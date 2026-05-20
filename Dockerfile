@@ -10,7 +10,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
     -o r2ps-server ./cmd/server
 
 # Runtime stage
-FROM alpine:3.21
+FROM alpine:3.23
 WORKDIR /app
 RUN apk add --no-cache ca-certificates softhsm wget
 COPY --from=builder /app/r2ps-server /app/r2ps-server
