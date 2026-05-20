@@ -1,7 +1,7 @@
 # Build stage
 FROM golang:1.26-alpine AS builder
 WORKDIR /app
-RUN apk add --no-cache git ca-certificates gcc musl-dev pkcs11-helper-dev softhsm
+RUN apk add --no-cache git ca-certificates gcc musl-dev
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
