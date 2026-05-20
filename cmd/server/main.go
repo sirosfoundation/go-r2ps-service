@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/elliptic"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -57,6 +59,7 @@ func main() {
 	hsmCfg := hsm.PKCS11Config{
 		ModulePath: hsmModule,
 		PIN:        hsmPIN,
+		PoolSize:   envInt("R2PS_HSM_POOL_SIZE", 4),
 	}
 	if label := os.Getenv("R2PS_HSM_TOKEN_LABEL"); label != "" {
 		hsmCfg.TokenLabel = label
@@ -102,6 +105,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Start session cleanup goroutine
+	dispatcher.StartSessionCleanup(1 * time.Minute)
+
+	hsmTimeout := envDuration("R2PS_HSM_TIMEOUT", 5*time.Second)
+
 	mux := http.NewServeMux()
 
 	// Observability endpoints
@@ -113,15 +121,25 @@ func main() {
 	mux.HandleFunc("GET /health", handleHealthz)
 
 	// R2PS protocol endpoint
-	mux.HandleFunc("POST /r2ps", r2psHandler(dispatcher))
+	mux.HandleFunc("POST /r2ps", r2psHandler(dispatcher, hsmTimeout))
 
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           mux,
+		Handler:           recoverMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+	}
+
+	// TLS configuration
+	tlsCert := os.Getenv("R2PS_TLS_CERT")
+	tlsKey := os.Getenv("R2PS_TLS_KEY")
+	useTLS := tlsCert != "" && tlsKey != ""
+	if useTLS {
+		srv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
 	}
 
 	// Graceful shutdown
@@ -129,8 +147,16 @@ func main() {
 	defer stop()
 
 	go func() {
-		slog.Info("starting server", "addr", listen)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Info("starting server", "addr", listen, "tls", useTLS,
+			"hsm_pool_size", hsmBackend.PoolSize())
+		var err error
+		if useTLS {
+			err = srv.ListenAndServeTLS(tlsCert, tlsKey)
+		} else {
+			slog.Warn("TLS disabled — set R2PS_TLS_CERT and R2PS_TLS_KEY for production")
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server failed", "error", err)
 			os.Exit(1)
 		}
@@ -194,7 +220,7 @@ func readyzHandler(backend *hsm.PKCS11Backend) http.HandlerFunc {
 	}
 }
 
-func r2psHandler(dispatcher *service.Dispatcher) http.HandlerFunc {
+func r2psHandler(dispatcher *service.Dispatcher, hsmTimeout time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		service.R2PSRequestsTotal.WithLabelValues("received").Inc()
 		start := time.Now()
@@ -206,7 +232,11 @@ func r2psHandler(dispatcher *service.Dispatcher) http.HandlerFunc {
 			return
 		}
 
-		resp, err := dispatcher.Process(r.Context(), body)
+		// Apply HSM operation timeout to request context
+		ctx, cancel := context.WithTimeout(r.Context(), hsmTimeout)
+		defer cancel()
+
+		resp, err := dispatcher.Process(ctx, body)
 		elapsed := time.Since(start).Seconds()
 
 		if err != nil {
@@ -254,6 +284,18 @@ func mapErrorStatus(code string) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				slog.Error("panic recovered", "error", err, "stack", string(debug.Stack()))
+				http.Error(w, `{"error_code":"server_error","error_message":"internal error"}`, http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func envOr(key, fallback string) string {

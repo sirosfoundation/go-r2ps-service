@@ -4,11 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
+
+var validKid = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
+
+func validateKid(kid string) error {
+	if !validKid.MatchString(kid) {
+		return fmt.Errorf("invalid kid format")
+	}
+	return nil
+}
 
 // --- HSM ECDSA Sign Handler ---
 
@@ -41,6 +51,15 @@ func (h *ECDSAHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]
 	hashBytes, err := decodeBase64(req.Hash)
 	if err != nil {
 		return nil, fmt.Errorf("decode hash: %w", err)
+	}
+
+	if err := validateKid(req.Kid); err != nil {
+		return nil, err
+	}
+
+	// Validate hash length: 32 (SHA-256), 48 (SHA-384), or 64 (SHA-512)
+	if len(hashBytes) != 32 && len(hashBytes) != 48 && len(hashBytes) != 64 {
+		return nil, fmt.Errorf("invalid hash length: %d", len(hashBytes))
 	}
 
 	sig, err := h.backend.Sign(ctx, req.Kid, hashBytes)
@@ -131,6 +150,15 @@ func (h *ECDHHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]b
 	peerKey, err := decodeBase64(req.PeerPubKey)
 	if err != nil {
 		return nil, fmt.Errorf("decode peer key: %w", err)
+	}
+
+	if err := validateKid(req.Kid); err != nil {
+		return nil, err
+	}
+
+	// Validate peer public key length: 33 (compressed) or 65 (uncompressed) for P-256
+	if len(peerKey) != 33 && len(peerKey) != 65 && len(peerKey) != 49 && len(peerKey) != 97 && len(peerKey) != 67 && len(peerKey) != 133 {
+		return nil, fmt.Errorf("invalid peer public key length")
 	}
 
 	secret, err := h.backend.ECDH(ctx, req.Kid, peerKey)

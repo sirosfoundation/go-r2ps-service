@@ -1,0 +1,12 @@
+.git
+.github
+.badges
+.golangci.yml
+.pre-commit-config.yaml
+*.md
+!go.mod
+!go.sum
+coverage.out
+test/
+Makefile
+LICENSE

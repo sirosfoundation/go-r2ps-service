@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
-	"sync"
 
 	"github.com/miekg/pkcs11"
 )
@@ -20,16 +19,17 @@ type PKCS11Config struct {
 	SlotID     uint   // slot number
 	PIN        string // user PIN for the token
 	TokenLabel string // optional: find slot by label instead of ID
+	PoolSize   int    // number of concurrent PKCS#11 sessions (default 4)
 }
 
-// PKCS11Backend implements Backend using a PKCS#11 token.
+// PKCS11Backend implements Backend using a pool of PKCS#11 sessions.
 type PKCS11Backend struct {
-	mu      sync.Mutex
-	ctx     *pkcs11.Ctx
-	session pkcs11.SessionHandle
+	ctx    *pkcs11.Ctx
+	pool   chan pkcs11.SessionHandle
+	slotID uint
 }
 
-// NewPKCS11Backend connects to a PKCS#11 token and logs in.
+// NewPKCS11Backend connects to a PKCS#11 token and creates a session pool.
 func NewPKCS11Backend(cfg PKCS11Config) (*PKCS11Backend, error) {
 	ctx := pkcs11.New(cfg.ModulePath)
 	if ctx == nil {
@@ -65,38 +65,91 @@ func NewPKCS11Backend(cfg PKCS11Config) (*PKCS11Backend, error) {
 		}
 	}
 
-	session, err := ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
+	poolSize := cfg.PoolSize
+	if poolSize <= 0 {
+		poolSize = 4
+	}
+
+	// Open first session and login (login is per-token, applies to all sessions)
+	firstSession, err := ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
 	if err != nil {
 		_ = ctx.Finalize()
 		return nil, fmt.Errorf("open session: %w", err)
 	}
 
-	if err := ctx.Login(session, pkcs11.CKU_USER, cfg.PIN); err != nil {
-		_ = ctx.CloseSession(session)
+	if err := ctx.Login(firstSession, pkcs11.CKU_USER, cfg.PIN); err != nil {
+		_ = ctx.CloseSession(firstSession)
 		_ = ctx.Finalize()
 		return nil, fmt.Errorf("login: %w", err)
 	}
 
+	pool := make(chan pkcs11.SessionHandle, poolSize)
+	pool <- firstSession
+
+	// Open remaining sessions (login state is shared per-token)
+	for i := 1; i < poolSize; i++ {
+		sess, err := ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
+		if err != nil {
+			// Close already-created sessions and bail
+			close(pool)
+			for s := range pool {
+				_ = ctx.CloseSession(s)
+			}
+			_ = ctx.Logout(firstSession)
+			_ = ctx.Finalize()
+			return nil, fmt.Errorf("open pool session %d: %w", i, err)
+		}
+		pool <- sess
+	}
+
 	return &PKCS11Backend{
-		ctx:     ctx,
-		session: session,
+		ctx:    ctx,
+		pool:   pool,
+		slotID: slotID,
 	}, nil
 }
 
-// Close logs out and cleans up the PKCS#11 session.
-func (b *PKCS11Backend) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// acquire gets a session from the pool, respecting context cancellation.
+func (b *PKCS11Backend) acquire(ctx context.Context) (pkcs11.SessionHandle, error) {
+	select {
+	case sess := <-b.pool:
+		return sess, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
 
-	_ = b.ctx.Logout(b.session)
-	_ = b.ctx.CloseSession(b.session)
+// release returns a session to the pool.
+func (b *PKCS11Backend) release(sess pkcs11.SessionHandle) {
+	b.pool <- sess
+}
+
+// Close logs out and cleans up all PKCS#11 sessions.
+func (b *PKCS11Backend) Close() error {
+	// Drain pool and close all sessions
+	close(b.pool)
+	var first pkcs11.SessionHandle
+	var gotFirst bool
+	for s := range b.pool {
+		if !gotFirst {
+			first = s
+			gotFirst = true
+		}
+		_ = b.ctx.CloseSession(s)
+	}
+	if gotFirst {
+		_ = b.ctx.Logout(first)
+	}
 	_ = b.ctx.Finalize()
 	return nil
 }
 
-func (b *PKCS11Backend) GenerateECKey(_ context.Context, curveName string) (string, []byte, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *PKCS11Backend) GenerateECKey(ctx context.Context, curveName string) (string, []byte, error) {
+	session, err := b.acquire(ctx)
+	if err != nil {
+		return "", nil, fmt.Errorf("acquire session: %w", err)
+	}
+	defer b.release(session)
 
 	oid, err := curveOID(curveName)
 	if err != nil {
@@ -130,7 +183,7 @@ func (b *PKCS11Backend) GenerateECKey(_ context.Context, curveName string) (stri
 	}
 
 	pubHandle, _, err := b.ctx.GenerateKeyPair(
-		b.session,
+		session,
 		[]*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_EC_KEY_PAIR_GEN, nil)},
 		pubTemplate,
 		privTemplate,
@@ -140,7 +193,7 @@ func (b *PKCS11Backend) GenerateECKey(_ context.Context, curveName string) (stri
 	}
 
 	// Read the EC point from the public key
-	pubBytes, err := b.readECPoint(pubHandle, curveName)
+	pubBytes, err := b.readECPoint(session, pubHandle, curveName)
 	if err != nil {
 		return "", nil, fmt.Errorf("read public key: %w", err)
 	}
@@ -150,18 +203,18 @@ func (b *PKCS11Backend) GenerateECKey(_ context.Context, curveName string) (stri
 	kid := hex.EncodeToString(hash[:16])
 
 	// Update CKA_ID to match the computed kid
-	if err := b.ctx.SetAttributeValue(b.session, pubHandle, []*pkcs11.Attribute{
+	if err := b.ctx.SetAttributeValue(session, pubHandle, []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_ID, []byte(kid)),
 	}); err != nil {
 		return "", nil, fmt.Errorf("update pub CKA_ID: %w", err)
 	}
 
 	// Find the private key by the temporary kidBytes and update it
-	privHandle, err := b.findPrivateKeyByID(kidBytes)
+	privHandle, err := b.findPrivateKeyByID(session, kidBytes)
 	if err != nil {
 		return "", nil, fmt.Errorf("find private key: %w", err)
 	}
-	if err := b.ctx.SetAttributeValue(b.session, privHandle, []*pkcs11.Attribute{
+	if err := b.ctx.SetAttributeValue(session, privHandle, []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_ID, []byte(kid)),
 	}); err != nil {
 		return "", nil, fmt.Errorf("update priv CKA_ID: %w", err)
@@ -170,22 +223,25 @@ func (b *PKCS11Backend) GenerateECKey(_ context.Context, curveName string) (stri
 	return kid, pubBytes, nil
 }
 
-func (b *PKCS11Backend) Sign(_ context.Context, kid string, hash []byte) ([]byte, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	privHandle, err := b.findPrivateKeyByID([]byte(kid))
+func (b *PKCS11Backend) Sign(ctx context.Context, kid string, hash []byte) ([]byte, error) {
+	session, err := b.acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("find key %s: %w", kid, err)
+		return nil, fmt.Errorf("acquire session: %w", err)
+	}
+	defer b.release(session)
+
+	privHandle, err := b.findPrivateKeyByID(session, []byte(kid))
+	if err != nil {
+		return nil, fmt.Errorf("find key: %w", err)
 	}
 
-	if err := b.ctx.SignInit(b.session, []*pkcs11.Mechanism{
+	if err := b.ctx.SignInit(session, []*pkcs11.Mechanism{
 		pkcs11.NewMechanism(pkcs11.CKM_ECDSA, nil),
 	}, privHandle); err != nil {
 		return nil, fmt.Errorf("sign init: %w", err)
 	}
 
-	rawSig, err := b.ctx.Sign(b.session, hash)
+	rawSig, err := b.ctx.Sign(session, hash)
 	if err != nil {
 		return nil, fmt.Errorf("sign: %w", err)
 	}
@@ -194,20 +250,23 @@ func (b *PKCS11Backend) Sign(_ context.Context, kid string, hash []byte) ([]byte
 	return rawSigToASN1(rawSig)
 }
 
-func (b *PKCS11Backend) ECDH(_ context.Context, kid string, peerPubKey []byte) ([]byte, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	privHandle, err := b.findPrivateKeyByID([]byte(kid))
+func (b *PKCS11Backend) ECDH(ctx context.Context, kid string, peerPubKey []byte) ([]byte, error) {
+	session, err := b.acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("find key %s: %w", kid, err)
+		return nil, fmt.Errorf("acquire session: %w", err)
+	}
+	defer b.release(session)
+
+	privHandle, err := b.findPrivateKeyByID(session, []byte(kid))
+	if err != nil {
+		return nil, fmt.Errorf("find key: %w", err)
 	}
 
 	// Ensure peer key is in uncompressed form (0x04 || x || y)
 	ecPoint := peerPubKey
 	if len(ecPoint) > 0 && (ecPoint[0] == 0x02 || ecPoint[0] == 0x03) {
 		// Compressed — need to decompress. Determine curve from our key.
-		curveName, err := b.getKeyCurve(privHandle)
+		curveName, err := b.getKeyCurve(session, privHandle)
 		if err != nil {
 			return nil, fmt.Errorf("get key curve: %w", err)
 		}
@@ -234,7 +293,7 @@ func (b *PKCS11Backend) ECDH(_ context.Context, kid string, peerPubKey []byte) (
 	}
 
 	secretHandle, err := b.ctx.DeriveKey(
-		b.session,
+		session,
 		[]*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_ECDH1_DERIVE, params)},
 		privHandle,
 		deriveTemplate,
@@ -244,7 +303,7 @@ func (b *PKCS11Backend) ECDH(_ context.Context, kid string, peerPubKey []byte) (
 	}
 
 	// Extract the secret value
-	attrs, err := b.ctx.GetAttributeValue(b.session, secretHandle, []*pkcs11.Attribute{
+	attrs, err := b.ctx.GetAttributeValue(session, secretHandle, []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_VALUE, nil),
 	})
 	if err != nil {
@@ -256,29 +315,32 @@ func (b *PKCS11Backend) ECDH(_ context.Context, kid string, peerPubKey []byte) (
 	}
 
 	// Clean up the derived key object
-	_ = b.ctx.DestroyObject(b.session, secretHandle)
+	_ = b.ctx.DestroyObject(session, secretHandle)
 
 	return attrs[0].Value, nil
 }
 
-func (b *PKCS11Backend) ListKeys(_ context.Context, curves []string) ([]KeyInfo, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *PKCS11Backend) ListKeys(ctx context.Context, curves []string) ([]KeyInfo, error) {
+	session, err := b.acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire session: %w", err)
+	}
+	defer b.release(session)
 
 	template := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PUBLIC_KEY),
 		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, pkcs11.CKK_EC),
 	}
 
-	if err := b.ctx.FindObjectsInit(b.session, template); err != nil {
+	if err := b.ctx.FindObjectsInit(session, template); err != nil {
 		return nil, fmt.Errorf("find init: %w", err)
 	}
 
 	var keys []KeyInfo
 	for {
-		handles, _, err := b.ctx.FindObjects(b.session, 32)
+		handles, _, err := b.ctx.FindObjects(session, 32)
 		if err != nil {
-			_ = b.ctx.FindObjectsFinal(b.session)
+			_ = b.ctx.FindObjectsFinal(session)
 			return nil, fmt.Errorf("find objects: %w", err)
 		}
 		if len(handles) == 0 {
@@ -286,7 +348,7 @@ func (b *PKCS11Backend) ListKeys(_ context.Context, curves []string) ([]KeyInfo,
 		}
 
 		for _, h := range handles {
-			curveName, err := b.getKeyCurve(h)
+			curveName, err := b.getKeyCurve(session, h)
 			if err != nil {
 				continue
 			}
@@ -295,12 +357,12 @@ func (b *PKCS11Backend) ListKeys(_ context.Context, curves []string) ([]KeyInfo,
 				continue
 			}
 
-			pubBytes, err := b.readECPoint(h, curveName)
+			pubBytes, err := b.readECPoint(session, h, curveName)
 			if err != nil {
 				continue
 			}
 
-			attrs, err := b.ctx.GetAttributeValue(b.session, h, []*pkcs11.Attribute{
+			attrs, err := b.ctx.GetAttributeValue(session, h, []*pkcs11.Attribute{
 				pkcs11.NewAttribute(pkcs11.CKA_ID, nil),
 			})
 			if err != nil || len(attrs) == 0 {
@@ -316,35 +378,40 @@ func (b *PKCS11Backend) ListKeys(_ context.Context, curves []string) ([]KeyInfo,
 		}
 	}
 
-	_ = b.ctx.FindObjectsFinal(b.session)
+	_ = b.ctx.FindObjectsFinal(session)
 	return keys, nil
+}
+
+// PoolSize returns the configured pool size (number of available + in-use sessions).
+func (b *PKCS11Backend) PoolSize() int {
+	return cap(b.pool)
 }
 
 // --- helpers ---
 
-func (b *PKCS11Backend) findPrivateKeyByID(id []byte) (pkcs11.ObjectHandle, error) {
+func (b *PKCS11Backend) findPrivateKeyByID(session pkcs11.SessionHandle, id []byte) (pkcs11.ObjectHandle, error) {
 	template := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_PRIVATE_KEY),
 		pkcs11.NewAttribute(pkcs11.CKA_ID, id),
 	}
 
-	if err := b.ctx.FindObjectsInit(b.session, template); err != nil {
+	if err := b.ctx.FindObjectsInit(session, template); err != nil {
 		return 0, fmt.Errorf("find init: %w", err)
 	}
-	defer b.ctx.FindObjectsFinal(b.session) //nolint:errcheck // best-effort cleanup
+	defer b.ctx.FindObjectsFinal(session) //nolint:errcheck // best-effort cleanup
 
-	handles, _, err := b.ctx.FindObjects(b.session, 1)
+	handles, _, err := b.ctx.FindObjects(session, 1)
 	if err != nil {
 		return 0, fmt.Errorf("find objects: %w", err)
 	}
 	if len(handles) == 0 {
-		return 0, fmt.Errorf("key not found: %s", string(id))
+		return 0, fmt.Errorf("key not found")
 	}
 	return handles[0], nil
 }
 
-func (b *PKCS11Backend) readECPoint(handle pkcs11.ObjectHandle, curveName string) ([]byte, error) {
-	attrs, err := b.ctx.GetAttributeValue(b.session, handle, []*pkcs11.Attribute{
+func (b *PKCS11Backend) readECPoint(session pkcs11.SessionHandle, handle pkcs11.ObjectHandle, curveName string) ([]byte, error) {
+	attrs, err := b.ctx.GetAttributeValue(session, handle, []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_EC_POINT, nil),
 	})
 	if err != nil {
@@ -378,8 +445,8 @@ func (b *PKCS11Backend) readECPoint(handle pkcs11.ObjectHandle, curveName string
 	return elliptic.MarshalCompressed(curve, x, y), nil
 }
 
-func (b *PKCS11Backend) getKeyCurve(handle pkcs11.ObjectHandle) (string, error) {
-	attrs, err := b.ctx.GetAttributeValue(b.session, handle, []*pkcs11.Attribute{
+func (b *PKCS11Backend) getKeyCurve(session pkcs11.SessionHandle, handle pkcs11.ObjectHandle) (string, error) {
+	attrs, err := b.ctx.GetAttributeValue(session, handle, []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_EC_PARAMS, nil),
 	})
 	if err != nil {

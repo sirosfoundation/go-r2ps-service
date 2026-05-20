@@ -102,6 +102,21 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	}, nil
 }
 
+// StartSessionCleanup runs a background goroutine that periodically removes expired sessions.
+func (d *Dispatcher) StartSessionCleanup(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			count := d.sessions.CleanExpired()
+			if count > 0 {
+				slog.Debug("cleaned expired sessions", "count", count)
+				ActiveSessions.Sub(float64(count))
+			}
+		}
+	}()
+}
+
 // Process handles a raw R2PS POST body (JWS compact serialization).
 // Returns a JWS compact serialization response or an error response.
 func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
