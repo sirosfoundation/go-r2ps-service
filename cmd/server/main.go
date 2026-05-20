@@ -1,16 +1,22 @@
 package main
 
 import (
+	"context"
 	"crypto/elliptic"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"strings"
+	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
@@ -20,31 +26,32 @@ import (
 )
 
 func main() {
-	listen := os.Getenv("R2PS_LISTEN")
-	if listen == "" {
-		listen = ":8443"
-	}
+	initLogging()
+
+	listen := envOr("R2PS_LISTEN", ":8443")
 
 	// Generate ephemeral server key (production would load from config/HSM)
 	serverKey, err := icrypto.GenerateECKey(elliptic.P256())
 	if err != nil {
-		log.Fatalf("generate server key: %v", err)
+		slog.Error("failed to generate server key", "error", err)
+		os.Exit(1)
 	}
 
-	// Generate OPAQUE key material
 	opaqueKey, err := pake.GenerateServerKeyMaterial()
 	if err != nil {
-		log.Fatalf("generate OPAQUE key material: %v", err)
+		slog.Error("failed to generate OPAQUE key material", "error", err)
+		os.Exit(1)
 	}
 
-	// Set up PKCS#11 HSM backend
 	hsmModule := os.Getenv("R2PS_HSM_MODULE")
 	if hsmModule == "" {
-		log.Fatal("R2PS_HSM_MODULE must be set (path to PKCS#11 .so)")
+		slog.Error("R2PS_HSM_MODULE must be set")
+		os.Exit(1)
 	}
 	hsmPIN := os.Getenv("R2PS_HSM_PIN")
 	if hsmPIN == "" {
-		log.Fatal("R2PS_HSM_PIN must be set")
+		slog.Error("R2PS_HSM_PIN must be set")
+		os.Exit(1)
 	}
 
 	hsmCfg := hsm.PKCS11Config{
@@ -57,16 +64,19 @@ func main() {
 	if slotStr := os.Getenv("R2PS_HSM_SLOT"); slotStr != "" {
 		slot, err := strconv.ParseUint(slotStr, 10, 32)
 		if err != nil {
-			log.Fatalf("invalid R2PS_HSM_SLOT: %v", err)
+			slog.Error("invalid R2PS_HSM_SLOT", "value", slotStr)
+			os.Exit(1)
 		}
 		hsmCfg.SlotID = uint(slot)
 	}
 
 	hsmBackend, err := hsm.NewPKCS11Backend(hsmCfg)
 	if err != nil {
-		log.Fatalf("connect to HSM: %v", err)
+		slog.Error("failed to connect to HSM", "error", err)
+		os.Exit(1)
 	}
 	defer hsmBackend.Close() //nolint:errcheck // best-effort cleanup on shutdown
+
 	handlers := []service.Handler{
 		service.NewECDSAHandler(hsmBackend),
 		service.NewECKeygenHandler(hsmBackend),
@@ -74,34 +84,131 @@ func main() {
 		service.NewListKeysHandler(hsmBackend),
 	}
 
+	maxAttempts := envInt("R2PS_MAX_ATTEMPTS", 5)
+	lockoutDur := envDuration("R2PS_LOCKOUT_DURATION", 15*time.Minute)
+	sessionTTL := envDuration("R2PS_SESSION_TTL", 5*time.Minute)
+
 	dispatcher, err := service.NewDispatcher(service.DispatcherConfig{
 		ServerKey:   serverKey,
 		OPAQUEKey:   opaqueKey,
 		Records:     service.NewInMemoryRecordStore(),
 		Handlers:    handlers,
-		MaxAttempts: 5,
-		LockoutDur:  15 * time.Minute,
-		SessionTTL:  5 * time.Minute,
+		MaxAttempts: maxAttempts,
+		LockoutDur:  lockoutDur,
+		SessionTTL:  sessionTTL,
 	})
 	if err != nil {
-		log.Fatalf("create dispatcher: %v", err)
+		slog.Error("failed to create dispatcher", "error", err)
+		os.Exit(1)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"status":"ok"}`)
-	})
 
-	mux.HandleFunc("POST /r2ps", func(w http.ResponseWriter, r *http.Request) {
+	// Observability endpoints
+	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.HandleFunc("GET /readyz", readyzHandler(hsmBackend))
+	mux.Handle("GET /metrics", promhttp.Handler())
+
+	// Backward compat
+	mux.HandleFunc("GET /health", handleHealthz)
+
+	// R2PS protocol endpoint
+	mux.HandleFunc("POST /r2ps", r2psHandler(dispatcher))
+
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// Graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		slog.Info("starting server", "addr", listen)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("shutting down")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err)
+	}
+
+	slog.Info("server stopped")
+}
+
+// initLogging configures slog with level and format from environment.
+func initLogging() {
+	var level slog.Level
+	switch strings.ToUpper(os.Getenv("R2PS_LOG_LEVEL")) {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "INFO":
+		level = slog.LevelInfo
+	case "WARN", "WARNING":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	default:
+		level = slog.LevelWarn // default: only warn+error
+	}
+
+	opts := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler
+	if strings.EqualFold(os.Getenv("R2PS_LOG_FORMAT"), "json") {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+	slog.SetDefault(slog.New(handler))
+}
+
+func handleHealthz(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(w, `{"status":"ok"}`)
+}
+
+func readyzHandler(backend *hsm.PKCS11Backend) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Probe HSM by listing keys (lightweight operation)
+		if _, err := backend.ListKeys(context.Background(), nil); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, `{"status":"not ready","reason":"hsm"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"status":"ready"}`)
+	}
+}
+
+func r2psHandler(dispatcher *service.Dispatcher) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service.R2PSRequestsTotal.WithLabelValues("received").Inc()
+		start := time.Now()
+
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB limit
 		if err != nil {
 			writeError(w, http.StatusBadRequest, r2ps.ErrIllegalRequestData, "read body failed")
+			service.R2PSRequestsTotal.WithLabelValues("error").Inc()
 			return
 		}
 
 		resp, err := dispatcher.Process(r.Context(), body)
+		elapsed := time.Since(start).Seconds()
+
 		if err != nil {
 			var r2psErr *service.R2PSError
 			if errors.As(err, &r2psErr) {
@@ -110,17 +217,16 @@ func main() {
 			} else {
 				writeError(w, http.StatusInternalServerError, r2ps.ErrServerError, "internal error")
 			}
+			service.R2PSRequestsTotal.WithLabelValues("error").Inc()
+			service.R2PSRequestDuration.Observe(elapsed)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/jose")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(resp)
-	})
-
-	log.Printf("go-r2ps-service listening on %s", listen)
-	if err := http.ListenAndServe(listen, mux); err != nil {
-		log.Fatalf("server: %v", err)
+		service.R2PSRequestsTotal.WithLabelValues("success").Inc()
+		service.R2PSRequestDuration.Observe(elapsed)
 	}
 }
 
@@ -148,4 +254,29 @@ func mapErrorStatus(code string) int {
 	default:
 		return http.StatusInternalServerError
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return fallback
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
@@ -31,6 +32,7 @@ func NewECDSAHandler(backend hsm.Backend) *ECDSAHandler {
 func (h *ECDSAHandler) Type() string { return r2ps.TypeHSMECDSA }
 
 func (h *ECDSAHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
+	start := time.Now()
 	var req ECDSASignRequest
 	if err := json.Unmarshal(reqData, &req); err != nil {
 		return nil, fmt.Errorf("parse sign request: %w", err)
@@ -42,9 +44,12 @@ func (h *ECDSAHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]
 	}
 
 	sig, err := h.backend.Sign(ctx, req.Kid, hashBytes)
+	HSMOperationDuration.WithLabelValues("sign").Observe(time.Since(start).Seconds())
 	if err != nil {
+		HSMOperationsTotal.WithLabelValues("sign", "error").Inc()
 		return nil, fmt.Errorf("sign: %w", err)
 	}
+	HSMOperationsTotal.WithLabelValues("sign", "success").Inc()
 
 	resp := ECDSASignResponse{
 		Signature: encodeBase64(sig),
@@ -74,15 +79,19 @@ func NewECKeygenHandler(backend hsm.Backend) *ECKeygenHandler {
 func (h *ECKeygenHandler) Type() string { return r2ps.TypeHSMECKeygen }
 
 func (h *ECKeygenHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
+	start := time.Now()
 	var req ECKeygenRequest
 	if err := json.Unmarshal(reqData, &req); err != nil {
 		return nil, fmt.Errorf("parse keygen request: %w", err)
 	}
 
 	kid, pubKey, err := h.backend.GenerateECKey(ctx, req.Curve)
+	HSMOperationDuration.WithLabelValues("keygen").Observe(time.Since(start).Seconds())
 	if err != nil {
+		HSMOperationsTotal.WithLabelValues("keygen", "error").Inc()
 		return nil, fmt.Errorf("keygen: %w", err)
 	}
+	HSMOperationsTotal.WithLabelValues("keygen", "success").Inc()
 
 	resp := ECKeygenResponse{
 		Kid:    kid,
@@ -113,6 +122,7 @@ func NewECDHHandler(backend hsm.Backend) *ECDHHandler {
 func (h *ECDHHandler) Type() string { return r2ps.TypeHSMECDH }
 
 func (h *ECDHHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
+	start := time.Now()
 	var req ECDHRequest
 	if err := json.Unmarshal(reqData, &req); err != nil {
 		return nil, fmt.Errorf("parse ECDH request: %w", err)
@@ -124,9 +134,12 @@ func (h *ECDHHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]b
 	}
 
 	secret, err := h.backend.ECDH(ctx, req.Kid, peerKey)
+	HSMOperationDuration.WithLabelValues("ecdh").Observe(time.Since(start).Seconds())
 	if err != nil {
+		HSMOperationsTotal.WithLabelValues("ecdh", "error").Inc()
 		return nil, fmt.Errorf("ECDH: %w", err)
 	}
+	HSMOperationsTotal.WithLabelValues("ecdh", "success").Inc()
 
 	resp := ECDHResponse{
 		SharedSecret: encodeBase64(secret),
@@ -155,15 +168,19 @@ func NewListKeysHandler(backend hsm.Backend) *ListKeysHandler {
 func (h *ListKeysHandler) Type() string { return r2ps.TypeHSMListKeys }
 
 func (h *ListKeysHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
+	start := time.Now()
 	var req ListKeysRequest
 	if err := json.Unmarshal(reqData, &req); err != nil {
 		return nil, fmt.Errorf("parse list keys request: %w", err)
 	}
 
 	keys, err := h.backend.ListKeys(ctx, req.Curves)
+	HSMOperationDuration.WithLabelValues("list_keys").Observe(time.Since(start).Seconds())
 	if err != nil {
+		HSMOperationsTotal.WithLabelValues("list_keys", "error").Inc()
 		return nil, fmt.Errorf("list keys: %w", err)
 	}
+	HSMOperationsTotal.WithLabelValues("list_keys", "success").Inc()
 
 	resp := ListKeysResponse{Keys: keys}
 	return json.Marshal(resp)

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
@@ -252,6 +253,7 @@ func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, _
 	if err := d.opaque.AuthFinalize(reqData, sess.ClientMAC); err != nil {
 		_ = d.counter.RecordFailure(req.ClientID, req.Kid, req.Context)
 		d.sessions.Delete(req.PakeSessionID)
+		PAKEAuthTotal.WithLabelValues("failure").Inc()
 		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "authentication failed"}
 	}
 
@@ -260,6 +262,8 @@ func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, _
 	if err := d.sessions.MarkVerified(req.PakeSessionID); err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "session update failed"}
 	}
+	PAKEAuthTotal.WithLabelValues("success").Inc()
+	ActiveSessions.Inc()
 
 	pakeResp := r2ps.PAKEResponse{
 		PakeSessionID:         req.PakeSessionID,
@@ -272,7 +276,7 @@ func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, _
 func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
 	handler, ok := d.handlers[req.Type]
 	if !ok {
-		return nil, &R2PSError{Code: r2ps.ErrUnsupportedType, Msg: "unknown service type: " + req.Type}
+		return nil, &R2PSError{Code: r2ps.ErrUnsupportedType, Msg: "unknown service type"}
 	}
 
 	// Service requests require an authenticated session (enc=user)
@@ -296,7 +300,8 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 
 	respData, err := handler.Handle(ctx, req.ClientID, dataBytes)
 	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: err.Error()}
+		slog.Debug("service handler error", "type", req.Type, "error", err)
+		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: req.Type + " failed"}
 	}
 
 	// Encrypt response data with session key
@@ -372,12 +377,6 @@ func (d *Dispatcher) encryptAndSign(req *r2ps.ServiceRequest, pakeResp *r2ps.PAK
 	}
 
 	return []byte(signed), nil
-}
-
-// RandomBytes generates cryptographically random bytes.
-// Exposed for session ID generation.
-func init() {
-	// register crypto helper
 }
 
 // R2PSError represents a protocol-level error.
