@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/bytemare/opaque v0.18.0
-	github.com/go-jose/go-jose/v4 v4.1.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/miekg/pkcs11 v1.1.2
 )
 
