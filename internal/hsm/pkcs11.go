@@ -262,24 +262,28 @@ func (b *PKCS11Backend) ECDH(ctx context.Context, kid string, peerPubKey []byte)
 		return nil, fmt.Errorf("find key: %w", err)
 	}
 
+	// Determine the curve of our private key (needed for decompression and derive length)
+	curveName, err := b.getKeyCurve(session, privHandle)
+	if err != nil {
+		return nil, fmt.Errorf("get key curve: %w", err)
+	}
+	curve, err := parseCurve(curveName)
+	if err != nil {
+		return nil, err
+	}
+
 	// Ensure peer key is in uncompressed form (0x04 || x || y)
 	ecPoint := peerPubKey
 	if len(ecPoint) > 0 && (ecPoint[0] == 0x02 || ecPoint[0] == 0x03) {
-		// Compressed — need to decompress. Determine curve from our key.
-		curveName, err := b.getKeyCurve(session, privHandle)
-		if err != nil {
-			return nil, fmt.Errorf("get key curve: %w", err)
-		}
-		curve, err := parseCurve(curveName)
-		if err != nil {
-			return nil, err
-		}
 		x, y := elliptic.UnmarshalCompressed(curve, ecPoint)
 		if x == nil {
 			return nil, fmt.Errorf("decompress peer public key failed")
 		}
 		ecPoint = elliptic.Marshal(curve, x, y) //nolint:staticcheck // PKCS#11 needs uncompressed format
 	}
+
+	// Derived secret length matches the curve's field size
+	deriveLen := (curve.Params().BitSize + 7) / 8
 
 	// CKM_ECDH1_DERIVE with CKD_NULL
 	params := pkcs11.NewECDH1DeriveParams(pkcs11.CKD_NULL, nil, ecPoint)
@@ -289,7 +293,7 @@ func (b *PKCS11Backend) ECDH(ctx context.Context, kid string, peerPubKey []byte)
 		pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, pkcs11.CKK_GENERIC_SECRET),
 		pkcs11.NewAttribute(pkcs11.CKA_EXTRACTABLE, true),
 		pkcs11.NewAttribute(pkcs11.CKA_SENSITIVE, false),
-		pkcs11.NewAttribute(pkcs11.CKA_VALUE_LEN, 32),
+		pkcs11.NewAttribute(pkcs11.CKA_VALUE_LEN, deriveLen),
 	}
 
 	secretHandle, err := b.ctx.DeriveKey(
@@ -512,6 +516,11 @@ func parseCurve(name string) (elliptic.Curve, error) {
 }
 
 func rawSigToASN1(raw []byte) ([]byte, error) {
+	// Some hardware HSMs return ASN.1 DER directly; detect and pass through.
+	if len(raw) > 2 && raw[0] == 0x30 {
+		return raw, nil
+	}
+
 	if len(raw)%2 != 0 {
 		return nil, fmt.Errorf("invalid raw signature length: %d", len(raw))
 	}
