@@ -67,8 +67,7 @@ docker compose up
 
 ## Architecture
 
-See [security/go-r2ps-service-plan.md](../security/go-r2ps-service-plan.md) and
-[security/remote-wscd-architecture.md](../security/remote-wscd-architecture.md).
+See [docs/adr/](docs/adr/) for architecture decision records.
 
 ## Development
 
