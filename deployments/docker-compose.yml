@@ -1,0 +1,27 @@
+services:
+  softhsm:
+    image: alpine:3.21
+    command: >
+      sh -c "apk add --no-cache softhsm &&
+             mkdir -p /var/lib/softhsm/tokens &&
+             softhsm2-util --init-token --slot 0 --label r2ps --pin 1234 --so-pin 5678 &&
+             tail -f /dev/null"
+    volumes:
+      - softhsm-tokens:/var/lib/softhsm/tokens
+
+  r2ps-server:
+    build: .
+    ports:
+      - "8443:8443"
+    environment:
+      R2PS_HSM_MODULE: /usr/lib/softhsm/libsofthsm2.so
+      R2PS_HSM_SLOT: "0"
+      R2PS_HSM_PIN: "1234"
+      R2PS_LISTEN: ":8443"
+    volumes:
+      - softhsm-tokens:/var/lib/softhsm/tokens
+    depends_on:
+      - softhsm
+
+volumes:
+  softhsm-tokens:

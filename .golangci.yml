@@ -1,0 +1,29 @@
+# golangci-lint v2 configuration for go-r2ps-service
+# Run with: golangci-lint run ./...
+
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: false
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - misspell
+    - unconvert
+  disable:
+    - exhaustive
+    - unparam
+    - gocritic
+    - gosec
+    - unused
