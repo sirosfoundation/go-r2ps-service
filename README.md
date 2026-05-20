@@ -1,5 +1,17 @@
 # go-r2ps-service
 
+<div align="center">
+
+[![CI](https://github.com/sirosfoundation/go-r2ps-service/actions/workflows/ci.yml/badge.svg)](https://github.com/sirosfoundation/go-r2ps-service/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/sirosfoundation/go-r2ps-service.svg)](https://pkg.go.dev/github.com/sirosfoundation/go-r2ps-service)
+[![Go Report Card](https://goreportcard.com/badge/github.com/sirosfoundation/go-r2ps-service)](https://goreportcard.com/report/github.com/sirosfoundation/go-r2ps-service)
+[![Coverage](https://raw.githubusercontent.com/sirosfoundation/go-r2ps-service/badges/.badges/main/coverage.svg)](https://github.com/sirosfoundation/go-r2ps-service/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/sirosfoundation/go-r2ps-service)](https://go.dev/)
+[![GHCR](https://img.shields.io/badge/ghcr.io-sirosfoundation%2Fgo--r2ps--service-blue)](https://ghcr.io/sirosfoundation/go-r2ps-service)
+[![License](https://img.shields.io/badge/License-BSD_2--Clause-orange.svg)](LICENSE)
+
+</div>
+
 R2PS (Remote PAKE-Protected Services) server implementation in Go.
 
 Implements the [DIGG R2PS specification](https://github.com/diggsweden/wallet-r2ps-specification)

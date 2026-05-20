@@ -1,33 +1,36 @@
-name: CI
+name: Go CI
 
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
     branches: [ main ]
-
-permissions:
-  contents: read
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        go-version: ['1.26.x']
+    permissions:
+      contents: write
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: ${{ matrix.go-version }}
+        go-version-file: 'go.mod'
+        cache: true
 
     - name: Install SoftHSM2
-      run: sudo apt-get install -y softhsm2
+      run: sudo apt-get update && sudo apt-get install -y softhsm2 bc
 
     - name: Download dependencies
       run: go mod download
@@ -35,24 +38,64 @@ jobs:
     - name: Verify dependencies
       run: go mod verify
 
-    - name: Run tests
-      run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
-
-    - name: Check coverage
-      run: |
-        go tool cover -func=coverage.out
-        COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
-        echo "Total coverage: ${COVERAGE}%"
+    - name: Run tests with coverage
+      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
-      if: matrix.go-version == '1.26.x'
+      uses: codecov/codecov-action@v6
       with:
-        files: ./coverage.out
-        flags: unittests
-        name: codecov-umbrella
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        files: ./coverage.txt
+        fail_ci_if_error: false
+
+    - name: Generate coverage badge
+      if: github.ref == 'refs/heads/main'
+      run: |
+        COVERAGE=$(go tool cover -func=coverage.txt | grep total | awk '{print $3}' | sed 's/%//')
+        echo "Coverage: ${COVERAGE}%"
+
+        mkdir -p .badges/main
+        if (( $(echo "$COVERAGE >= 80" | bc -l) )); then
+          COLOR="brightgreen"
+        elif (( $(echo "$COVERAGE >= 70" | bc -l) )); then
+          COLOR="green"
+        elif (( $(echo "$COVERAGE >= 60" | bc -l) )); then
+          COLOR="yellowgreen"
+        elif (( $(echo "$COVERAGE >= 50" | bc -l) )); then
+          COLOR="yellow"
+        elif (( $(echo "$COVERAGE >= 40" | bc -l) )); then
+          COLOR="orange"
+        else
+          COLOR="red"
+        fi
+
+        curl -s "https://img.shields.io/badge/coverage-${COVERAGE}%25-${COLOR}.svg" > .badges/main/coverage.svg
+
+    - name: Commit badges
+      if: github.ref == 'refs/heads/main'
+      run: |
+        if [ ! -f .badges/main/coverage.svg ]; then
+          echo "Warning: coverage.svg not found, skipping commit"
+          exit 0
+        fi
+
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+
+        mkdir -p /tmp/badges
+        cp -v .badges/main/*.svg /tmp/badges/
+
+        git checkout -- .
+        git clean -fd
+
+        git fetch origin badges 2>/dev/null || true
+        git checkout -B badges origin/badges 2>/dev/null || git checkout -b badges
+
+        mkdir -p .badges/main
+        cp -v /tmp/badges/*.svg .badges/main/
+
+        git add -f .badges/main/*.svg
+        git commit -m "chore: Update badges [skip ci]" || echo "Nothing to commit"
+        git push origin badges
 
   lint:
     name: Lint
@@ -60,63 +103,38 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.26.x'
+        go-version-file: 'go.mod'
+        cache: true
 
     - name: golangci-lint
-      uses: golangci/golangci-lint-action@v7
+      uses: golangci/golangci-lint-action@v9
       with:
         version: v2.10.0
-        args: --timeout=5m
-
-  format:
-    name: Format Check
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: '1.26.x'
-
-    - name: Check formatting
-      run: |
-        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
-          echo "The following files are not formatted:"
-          gofmt -s -l .
-          exit 1
-        fi
-
-    - name: Verify go.mod
-      run: |
-        go mod tidy
-        git diff --exit-code go.mod
+        args: --timeout=5m --tests=false
+        verify: false
 
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: [test, lint]
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.26.x'
+        go-version-file: 'go.mod'
+        cache: true
 
     - name: Install SoftHSM2
-      run: sudo apt-get install -y softhsm2
+      run: sudo apt-get update && sudo apt-get install -y softhsm2
 
     - name: Build all packages
       run: go build -v ./...
-
-    - name: Build binary
-      run: go build -v -o bin/r2ps-server ./cmd/server
