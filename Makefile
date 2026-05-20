@@ -41,11 +41,12 @@ fmt:
 vet:
 	go vet ./...
 
-## lint: Run formatting and vet checks
-lint: fmt vet
+## lint: Run golangci-lint (install: https://golangci-lint.run/welcome/install/)
+lint:
+	golangci-lint run --timeout=5m --tests=false ./...
 
-## check: Format, vet, and test
-check: fmt vet test
+## check: Format, lint, and test
+check: fmt lint test
 
 ## tidy: Tidy go.mod
 tidy:

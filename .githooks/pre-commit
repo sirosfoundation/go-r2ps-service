@@ -34,4 +34,15 @@ if ! go vet ./... 2>&1; then
 fi
 echo "✓ Vet OK"
 
+if command -v golangci-lint &> /dev/null; then
+    echo "Running golangci-lint..."
+    if ! golangci-lint run --timeout=2m --tests=false $STAGED_GO_FILES 2>&1; then
+        echo "golangci-lint failed - fix issues before committing"
+        exit 1
+    fi
+    echo "✓ Lint OK"
+else
+    echo "⚠ golangci-lint not found, skipping (install: https://golangci-lint.run/welcome/install/)"
+fi
+
 echo "Pre-commit checks passed."

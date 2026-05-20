@@ -44,7 +44,7 @@ func NewPKCS11Backend(cfg PKCS11Config) (*PKCS11Backend, error) {
 	if cfg.TokenLabel != "" {
 		slots, err := ctx.GetSlotList(true)
 		if err != nil {
-			ctx.Finalize()
+			_ = ctx.Finalize()
 			return nil, fmt.Errorf("get slot list: %w", err)
 		}
 		found := false
@@ -60,20 +60,20 @@ func NewPKCS11Backend(cfg PKCS11Config) (*PKCS11Backend, error) {
 			}
 		}
 		if !found {
-			ctx.Finalize()
+			_ = ctx.Finalize()
 			return nil, fmt.Errorf("token with label %q not found", cfg.TokenLabel)
 		}
 	}
 
 	session, err := ctx.OpenSession(slotID, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
 	if err != nil {
-		ctx.Finalize()
+		_ = ctx.Finalize()
 		return nil, fmt.Errorf("open session: %w", err)
 	}
 
 	if err := ctx.Login(session, pkcs11.CKU_USER, cfg.PIN); err != nil {
-		ctx.CloseSession(session)
-		ctx.Finalize()
+		_ = ctx.CloseSession(session)
+		_ = ctx.Finalize()
 		return nil, fmt.Errorf("login: %w", err)
 	}
 
@@ -88,9 +88,9 @@ func (b *PKCS11Backend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	b.ctx.Logout(b.session)
-	b.ctx.CloseSession(b.session)
-	b.ctx.Finalize()
+	_ = b.ctx.Logout(b.session)
+	_ = b.ctx.CloseSession(b.session)
+	_ = b.ctx.Finalize()
 	return nil
 }
 
@@ -219,7 +219,7 @@ func (b *PKCS11Backend) ECDH(_ context.Context, kid string, peerPubKey []byte) (
 		if x == nil {
 			return nil, fmt.Errorf("decompress peer public key failed")
 		}
-		ecPoint = elliptic.Marshal(curve, x, y)
+		ecPoint = elliptic.Marshal(curve, x, y) //nolint:staticcheck // PKCS#11 needs uncompressed format
 	}
 
 	// CKM_ECDH1_DERIVE with CKD_NULL
@@ -256,7 +256,7 @@ func (b *PKCS11Backend) ECDH(_ context.Context, kid string, peerPubKey []byte) (
 	}
 
 	// Clean up the derived key object
-	b.ctx.DestroyObject(b.session, secretHandle)
+	_ = b.ctx.DestroyObject(b.session, secretHandle)
 
 	return attrs[0].Value, nil
 }
@@ -278,7 +278,7 @@ func (b *PKCS11Backend) ListKeys(_ context.Context, curves []string) ([]KeyInfo,
 	for {
 		handles, _, err := b.ctx.FindObjects(b.session, 32)
 		if err != nil {
-			b.ctx.FindObjectsFinal(b.session)
+			_ = b.ctx.FindObjectsFinal(b.session)
 			return nil, fmt.Errorf("find objects: %w", err)
 		}
 		if len(handles) == 0 {
@@ -316,7 +316,7 @@ func (b *PKCS11Backend) ListKeys(_ context.Context, curves []string) ([]KeyInfo,
 		}
 	}
 
-	b.ctx.FindObjectsFinal(b.session)
+	_ = b.ctx.FindObjectsFinal(b.session)
 	return keys, nil
 }
 
@@ -331,7 +331,7 @@ func (b *PKCS11Backend) findPrivateKeyByID(id []byte) (pkcs11.ObjectHandle, erro
 	if err := b.ctx.FindObjectsInit(b.session, template); err != nil {
 		return 0, fmt.Errorf("find init: %w", err)
 	}
-	defer b.ctx.FindObjectsFinal(b.session)
+	defer b.ctx.FindObjectsFinal(b.session) //nolint:errcheck // best-effort cleanup
 
 	handles, _, err := b.ctx.FindObjects(b.session, 1)
 	if err != nil {
@@ -370,7 +370,7 @@ func (b *PKCS11Backend) readECPoint(handle pkcs11.ObjectHandle, curveName string
 		return nil, err
 	}
 
-	x, y := elliptic.Unmarshal(curve, ecPoint)
+	x, y := elliptic.Unmarshal(curve, ecPoint) //nolint:staticcheck // PKCS#11 returns raw EC points
 	if x == nil {
 		return nil, fmt.Errorf("invalid uncompressed EC point (len=%d)", len(ecPoint))
 	}

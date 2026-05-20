@@ -29,13 +29,13 @@ func TestPKCS11Config(t *testing.T) (PKCS11Config, func()) {
 	confPath := filepath.Join(tokenDir, "softhsm2.conf")
 	confContent := fmt.Sprintf("directories.tokendir = %s\nobjectstore.backend = file\n", tokenDir)
 	if err := os.WriteFile(confPath, []byte(confContent), 0o600); err != nil {
-		os.RemoveAll(tokenDir)
+		_ = os.RemoveAll(tokenDir)
 		t.Fatalf("write softhsm2.conf: %v", err)
 	}
 
 	// Set SOFTHSM2_CONF before initializing token
 	origConf := os.Getenv("SOFTHSM2_CONF")
-	os.Setenv("SOFTHSM2_CONF", confPath)
+	t.Setenv("SOFTHSM2_CONF", confPath)
 
 	// Initialize token
 	cmd := exec.Command("softhsm2-util",
@@ -47,14 +47,14 @@ func TestPKCS11Config(t *testing.T) (PKCS11Config, func()) {
 	cmd.Env = append(os.Environ(), "SOFTHSM2_CONF="+confPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		os.RemoveAll(tokenDir)
-		os.Setenv("SOFTHSM2_CONF", origConf)
+		_ = os.RemoveAll(tokenDir)
+		t.Setenv("SOFTHSM2_CONF", origConf)
 		t.Fatalf("softhsm2-util init-token: %v\n%s", err, out)
 	}
 
 	cleanup := func() {
-		os.Setenv("SOFTHSM2_CONF", origConf)
-		os.RemoveAll(tokenDir)
+		t.Setenv("SOFTHSM2_CONF", origConf)
+		_ = os.RemoveAll(tokenDir)
 	}
 
 	return PKCS11Config{
@@ -76,7 +76,7 @@ func NewTestBackend(t *testing.T) (*PKCS11Backend, func()) {
 	}
 
 	return backend, func() {
-		backend.Close()
+		_ = backend.Close()
 		cleanup()
 	}
 }

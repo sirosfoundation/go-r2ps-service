@@ -24,7 +24,7 @@ func ECDHSharedSecret(privKey *ecdsa.PrivateKey, pubKey *ecdsa.PublicKey) ([]byt
 		return nil, fmt.Errorf("curve mismatch: %v vs %v", privKey.Curve.Params().Name, pubKey.Curve.Params().Name)
 	}
 
-	x, _ := privKey.Curve.ScalarMult(pubKey.X, pubKey.Y, privKey.D.Bytes())
+	x, _ := privKey.Curve.ScalarMult(pubKey.X, pubKey.Y, privKey.D.Bytes()) //nolint:staticcheck // required for raw ECDH with PKCS#11 keys
 	if x == nil {
 		return nil, fmt.Errorf("ECDH scalar multiplication failed")
 	}
@@ -59,12 +59,12 @@ func GenerateEphemeralECDH(peerPubKey *ecdsa.PublicKey) (*ecdsa.PublicKey, []byt
 
 // MarshalUncompressedPublicKey serializes an EC public key to uncompressed point format (04 || x || y).
 func MarshalUncompressedPublicKey(pub *ecdsa.PublicKey) []byte {
-	return elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+	return elliptic.Marshal(pub.Curve, pub.X, pub.Y) //nolint:staticcheck // interop with PKCS#11 raw EC points
 }
 
 // UnmarshalPublicKey deserializes an EC public key from uncompressed point format.
 func UnmarshalPublicKey(curve elliptic.Curve, data []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(curve, data)
+	x, y := elliptic.Unmarshal(curve, data) //nolint:staticcheck // interop with PKCS#11 raw EC points
 	if x == nil {
 		return nil, fmt.Errorf("invalid EC point")
 	}
@@ -81,13 +81,13 @@ func MarshalCompressedPublicKey(pub *ecdsa.PublicKey) []byte {
 	byteLen := (pub.Curve.Params().BitSize + 7) / 8
 	compressed := make([]byte, 1+byteLen)
 
-	if pub.Y.Bit(0) == 0 {
+	if pub.Y.Bit(0) == 0 { //nolint:staticcheck // need raw coordinate for compressed encoding
 		compressed[0] = 0x02
 	} else {
 		compressed[0] = 0x03
 	}
 
-	xBytes := pub.X.Bytes()
+	xBytes := pub.X.Bytes() //nolint:staticcheck // need raw coordinate for compressed encoding
 	copy(compressed[1+byteLen-len(xBytes):], xBytes)
 
 	return compressed

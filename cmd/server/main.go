@@ -66,7 +66,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect to HSM: %v", err)
 	}
-	defer hsmBackend.Close()
+	defer hsmBackend.Close() //nolint:errcheck // best-effort cleanup on shutdown
 	handlers := []service.Handler{
 		service.NewECDSAHandler(hsmBackend),
 		service.NewECKeygenHandler(hsmBackend),
@@ -91,7 +91,7 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok"}`)
+		_, _ = fmt.Fprintf(w, `{"status":"ok"}`)
 	})
 
 	mux.HandleFunc("POST /r2ps", func(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +115,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/jose")
 		w.WriteHeader(http.StatusOK)
-		w.Write(resp)
+		_, _ = w.Write(resp)
 	})
 
 	log.Printf("go-r2ps-service listening on %s", listen)
@@ -127,7 +127,7 @@ func main() {
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(r2ps.ErrorResponse{
+	_ = json.NewEncoder(w).Encode(r2ps.ErrorResponse{
 		ErrorCode:    code,
 		ErrorMessage: msg,
 	})
