@@ -6,33 +6,24 @@ Accepted
 
 ## Context
 
-The wallet backend handles sensitive cryptographic operations including:
-- Password hashing
-- JWT signing and verification
-- WebAuthn credential management
-- DID key generation
+The R2PS service handles sensitive cryptographic operations: PAKE authentication, JWS/JWE message envelopes, ECDSA signing, ECDH key agreement, and EC key generation via hardware security modules.
 
 ## Decision
 
-This project avoids implementing cryptographic primitives, favouring the reuse of existing, well-tested libraries:
+No custom cryptographic primitives. All operations use established, maintained libraries:
 
-- **Password hashing**: `golang.org/x/crypto/bcrypt`
-- **JWT operations**: `github.com/golang-jwt/jwt/v5` and `github.com/lestrrat-go/jwx/v3`
-- **WebAuthn**: `github.com/go-webauthn/webauthn`
-- **DID operations**: Reuse from `github.com/dc4eu/vc` project
+- **PAKE (OPAQUE)**: `github.com/bytemare/opaque` — implements RFC 9497
+- **JWS/JWE**: `github.com/go-jose/go-jose/v4` — JOSE standard implementation
+- **PKCS#11 (HSM)**: `github.com/miekg/pkcs11` — CGO bindings to PKCS#11 C API
+- **Standard library**: `crypto/ecdsa`, `crypto/elliptic`, `crypto/sha256` for non-HSM operations
 
 ## Rationale
 
-Cryptography is hard to get right. Making a mistake when implementing a cryptographic primitive will have serious implications for the security of protocols that build upon those primitives.
-
-Using well-tested, widely-adopted libraries:
-- Reduces the risk of security vulnerabilities
-- Benefits from community review and auditing
-- Provides better compatibility with standards
-- Simplifies maintenance
+Cryptography is hard to get right. A mistake in a primitive has cascading security implications for the entire R2PS protocol — which protects PID issuance and presentation flows.
 
 ## Consequences
 
-- Dependencies on external libraries must be kept up-to-date
-- Library choices should be evaluated for security and maintenance status
-- Custom crypto code is prohibited without explicit review
+- Dependencies tracked by Dependabot (weekly), CI runs `govulncheck`
+- Library upgrades are security-critical and must be prioritized
+- Custom crypto code is prohibited without explicit security review
+- PKCS#11 bindings require CGO — impacts cross-compilation and static analysis

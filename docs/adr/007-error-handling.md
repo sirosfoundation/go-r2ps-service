@@ -1,4 +1,4 @@
-# ADR-007: Error Handling
+# ADR-007: Error Handling and Sanitization
 
 ## Status
 
@@ -6,46 +6,25 @@ Accepted
 
 ## Context
 
-Consistent error handling is essential for debugging, logging, and user experience.
+R2PS handles HSM operations and PAKE authentication. Internal error details (HSM model, PKCS#11 error codes, key identifiers) must never reach the client — they are useful to attackers and irrelevant to the wallet.
 
 ## Decision
 
-1. **Sentinel errors** for common cases:
-   ```go
-   var (
-       ErrNotFound      = errors.New("not found")
-       ErrAlreadyExists = errors.New("already exists")
-       ErrUnauthorized  = errors.New("unauthorized")
-   )
-   ```
+1. **Protocol errors** use `R2PSError{Code, Msg}` with codes from `pkg/r2ps` (e.g. `ErrUnauthorized`, `ErrServerError`). Messages are generic.
 
-2. **Error wrapping** for context:
-   ```go
-   return fmt.Errorf("failed to create user: %w", err)
-   ```
+2. **Handler errors** are logged at `slog.Debug` with full details, then replaced with a generic message before returning to the dispatcher.
 
-3. **Error checking** with `errors.Is`:
-   ```go
-   if errors.Is(err, storage.ErrNotFound) {
-       return nil, ErrUserNotFound
-   }
-   ```
+3. **HSM/crypto internals** are never exposed in error messages sent to clients. Kid values, PKCS#11 error codes, and module paths are stripped.
 
-4. **API errors** with consistent format:
-   ```go
-   c.JSON(400, gin.H{"error": err.Error()})
-   ```
+4. **Error wrapping** (`%w`) is used internally for diagnostics but the dispatcher breaks the chain before responding.
 
 ## Rationale
 
-- Consistent error handling improves debugging
-- Error wrapping preserves the error chain
-- Sentinel errors enable type-safe error checking
-- Consistent API responses improve client experience
+R2PS is used for PID issuance and presentation. Leaking HSM internals or key identifiers in error responses creates an information disclosure risk. The dispatcher acts as a sanitization boundary.
 
 ## Consequences
 
-- All errors should be wrapped with context
-- API layer translates internal errors to HTTP responses
-- Logs include full error chains
-- Tests verify error conditions
+- `slog.Debug` must be used to log handler errors with full context
+- Client-facing error messages must be opaque ("sign failed", not "PKCS#11 CKR_KEY_HANDLE_INVALID")
+- `R2PS_LOG_LEVEL=DEBUG` must never be enabled in production
+- Tests should verify that error responses do not contain internal details

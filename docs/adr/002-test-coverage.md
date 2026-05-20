@@ -6,29 +6,25 @@ Accepted
 
 ## Context
 
-The wallet backend handles sensitive operations including user authentication, credential management, and cryptographic operations. High reliability is essential.
+The R2PS service handles PAKE authentication and HSM-backed cryptographic operations for PID issuance. High reliability is essential — failures could block credential workflows.
 
 ## Decision
 
-This project will aim for >70% test coverage overall, with higher coverage (>80%) for:
-- Storage layer implementations
-- Authentication and authorization
-- Cryptographic operations
-- API handlers
+Target >70% overall coverage, with >80% for:
+- HSM backend operations (`internal/hsm`)
+- PAKE authentication flows (`internal/pake`)
+- Cryptographic utilities (`internal/crypto`)
+- End-to-end protocol flows (`test/integration`)
+
+Integration tests use SoftHSM2 as a PKCS#11 backend. CI runs tests with `-race` to detect concurrency issues in the session pool.
 
 ## Rationale
 
-A high degree of test coverage leads to more robust code. Given our use of AI-assisted programming, comprehensive tests help reduce the effect of hallucination and catch regressions early.
-
-Test coverage serves multiple purposes:
-- Validates correct behavior
-- Documents expected functionality
-- Enables safe refactoring
-- Catches regressions early
+Given AI-assisted development, comprehensive tests reduce hallucination risk and catch regressions. The PKCS#11 session pool and OPAQUE state machine have complex concurrency and state semantics that require thorough testing.
 
 ## Consequences
 
 - All new code must include tests
-- PRs should not decrease overall coverage
-- CI pipeline enforces coverage thresholds
-- Test-driven development is encouraged
+- PRs must not decrease coverage
+- CI generates coverage badges per branch
+- SoftHSM2 is a build-time dependency for testing
