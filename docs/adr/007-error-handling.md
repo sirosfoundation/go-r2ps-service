@@ -18,6 +18,8 @@ R2PS handles HSM operations and PAKE authentication. Internal error details (HSM
 
 4. **Error wrapping** (`%w`) is used internally for diagnostics but the dispatcher breaks the chain before responding.
 
+5. **Panic recovery** (`recoverMiddleware`) only recovers from panics in request-scoped code (handlers, serialisation). If the stack trace indicates the failure originated in infrastructure code (HSM pool, PAKE session store, sync primitives, runtime fatal), the panic is re-raised so the process exits and the orchestration layer (Kubernetes, Docker) restarts a clean instance. A service that silently continues in a corrupted state is worse than a brief restart.
+
 ## Rationale
 
 R2PS is used for PID issuance and presentation. Leaking HSM internals or key identifiers in error responses creates an information disclosure risk. The dispatcher acts as a sanitization boundary.

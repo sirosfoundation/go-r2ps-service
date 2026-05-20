@@ -290,12 +290,39 @@ func recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				slog.Error("panic recovered", "error", err, "stack", string(debug.Stack()))
+				stack := string(debug.Stack())
+				slog.Error("panic recovered", "error", err, "stack", stack)
+
+				// If the panic originates from infrastructure code (HSM, pool, session store),
+				// the service may be in an unrecoverable state. Re-panic so the process exits
+				// and the orchestration layer (k8s, Docker) can restart a clean instance.
+				if isInfrastructurePanic(stack) {
+					panic(err)
+				}
+
 				http.Error(w, `{"error_code":"server_error","error_message":"internal error"}`, http.StatusInternalServerError)
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isInfrastructurePanic returns true if the panic stack trace indicates the
+// failure originated in infrastructure code whose corruption cannot be safely
+// recovered from at the request level.
+func isInfrastructurePanic(stack string) bool {
+	markers := []string{
+		"internal/hsm.",
+		"internal/pake.",
+		"sync.(*Pool)",
+		"runtime.fatal",
+	}
+	for _, m := range markers {
+		if strings.Contains(stack, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func envOr(key, fallback string) string {
