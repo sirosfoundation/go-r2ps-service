@@ -218,9 +218,10 @@ func TestProcessUnsupportedType(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:  r2ps.ProtocolVersion,
-		Type: "unknown_type",
-		Enc:  r2ps.EncUser,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Type:  "unknown_type",
+		Enc:   r2ps.EncUser,
 	})
 
 	_, err := d.Process(context.Background(), body)
@@ -234,9 +235,10 @@ func TestProcessServiceRequiresUserEnc(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:  r2ps.ProtocolVersion,
-		Type: r2ps.TypeHSMECKeygen,
-		Enc:  r2ps.EncDevice,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Type:  r2ps.TypeHSMECKeygen,
+		Enc:   r2ps.EncDevice,
 	})
 
 	_, err := d.Process(context.Background(), body)
@@ -251,6 +253,7 @@ func TestProcessServiceRequiresSession(t *testing.T) {
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:           r2ps.ProtocolVersion,
+		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
 		Type:          r2ps.TypeHSMECKeygen,
 		Enc:           r2ps.EncUser,
 		PakeSessionID: "nonexistent",
@@ -504,7 +507,7 @@ func TestPAKEUnsupportedProtocol(t *testing.T) {
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:      r2ps.ProtocolVersion,
-		Nonce:    "n1",
+		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
 		Iat:      time.Now().Unix(),
 		Enc:      r2ps.EncDevice,
 		Data:     encData,
@@ -534,7 +537,7 @@ func TestPAKEInvalidStateCombo(t *testing.T) {
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:      r2ps.ProtocolVersion,
-		Nonce:    "n1",
+		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
 		Iat:      time.Now().Unix(),
 		Enc:      r2ps.EncDevice,
 		Data:     encData,
@@ -566,7 +569,7 @@ func TestAuthEvaluateUnknownClient(t *testing.T) {
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:      r2ps.ProtocolVersion,
-		Nonce:    "n1",
+		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
 		Iat:      time.Now().Unix(),
 		Enc:      r2ps.EncDevice,
 		Data:     encData,
@@ -576,10 +579,13 @@ func TestAuthEvaluateUnknownClient(t *testing.T) {
 		Type:     r2ps.TypeAuthenticate,
 	})
 
-	_, err := d.Process(context.Background(), body)
-	r2psErr := err.(*R2PSError)
-	if r2psErr.Code != r2ps.ErrUnauthorized {
-		t.Errorf("code = %q, want UNAUTHORIZED", r2psErr.Code)
+	// With fake records, evaluate should succeed (returns KE2)
+	resp, err := d.Process(context.Background(), body)
+	if err != nil {
+		t.Fatalf("expected success with fake record, got error: %v", err)
+	}
+	if len(resp) == 0 {
+		t.Fatal("expected non-empty response")
 	}
 }
 

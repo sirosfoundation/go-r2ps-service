@@ -276,9 +276,11 @@ func mapErrorStatus(code string) int {
 	case r2ps.ErrAccessDenied:
 		return http.StatusForbidden
 	case r2ps.ErrUnsupportedType:
+		return http.StatusUnsupportedMediaType
+	case r2ps.ErrIllegalRequestData:
 		return http.StatusBadRequest
-	case r2ps.ErrIllegalRequestData, r2ps.ErrIllegalState:
-		return http.StatusBadRequest
+	case r2ps.ErrIllegalState:
+		return http.StatusConflict
 	case r2ps.ErrTryLater:
 		return http.StatusServiceUnavailable
 	default:

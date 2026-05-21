@@ -13,19 +13,25 @@ import (
 
 // SignJWS creates a JWS compact serialization of payload signed with key.
 // The key must be an *ecdsa.PrivateKey (ES256 for P-256, ES384 for P-384).
-func SignJWS(payload []byte, key *ecdsa.PrivateKey, kid string) (string, error) {
+// The typ parameter sets the JWS typ header; if empty, defaults to "JOSE".
+func SignJWS(payload []byte, key *ecdsa.PrivateKey, kid string, opts ...string) (string, error) {
 	alg, err := ecAlgorithm(key.Curve)
 	if err != nil {
 		return "", err
 	}
 
-	opts := jose.SignerOptions{}
-	opts.WithType("JOSE")
-	if kid != "" {
-		opts.WithHeader(jose.HeaderKey("kid"), kid)
+	typ := "JOSE"
+	if len(opts) > 0 && opts[0] != "" {
+		typ = opts[0]
 	}
 
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, &opts)
+	sopts := jose.SignerOptions{}
+	sopts.WithType(jose.ContentType(typ))
+	if kid != "" {
+		sopts.WithHeader(jose.HeaderKey("kid"), kid)
+	}
+
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, &sopts)
 	if err != nil {
 		return "", fmt.Errorf("create signer: %w", err)
 	}

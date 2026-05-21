@@ -136,11 +136,19 @@ func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "unsupported version"}
 	}
 
+	// Nonce must provide at least 64 bits of entropy (8 bytes when decoded)
+	nonceBytes, err := base64.URLEncoding.DecodeString(req.Nonce)
+	if err != nil || len(nonceBytes) < 8 {
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "nonce must be at least 8 bytes"}
+	}
+
 	// Route by type
 	switch req.Type {
 	case r2ps.TypePINRegistration:
 		return d.handlePAKE(ctx, &req)
 	case r2ps.TypeAuthenticate:
+		return d.handlePAKE(ctx, &req)
+	case r2ps.TypePINChange:
 		return d.handlePAKE(ctx, &req)
 	default:
 		return d.handleService(ctx, &req)
@@ -172,6 +180,10 @@ func (d *Dispatcher) handlePAKE(ctx context.Context, req *r2ps.ServiceRequest) (
 	case req.Type == r2ps.TypePINRegistration && pakeReq.State == r2ps.PAKEStateEvaluate:
 		return d.regEvaluate(ctx, req, &pakeReq, reqData)
 	case req.Type == r2ps.TypePINRegistration && pakeReq.State == r2ps.PAKEStateFinalize:
+		return d.regFinalize(ctx, req, &pakeReq, reqData)
+	case req.Type == r2ps.TypePINChange && pakeReq.State == r2ps.PAKEStateEvaluate:
+		return d.regEvaluate(ctx, req, &pakeReq, reqData)
+	case req.Type == r2ps.TypePINChange && pakeReq.State == r2ps.PAKEStateFinalize:
 		return d.regFinalize(ctx, req, &pakeReq, reqData)
 	case req.Type == r2ps.TypeAuthenticate && pakeReq.State == r2ps.PAKEStateEvaluate:
 		return d.authEvaluate(ctx, req, &pakeReq, reqData)
@@ -226,7 +238,8 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, p
 
 	record, err := d.records.GetRecord(req.ClientID, req.Kid)
 	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "unknown client/key"}
+		// Unknown client: use fake record to prevent client enumeration
+		record = d.opaque.FakeRecord([]byte(req.ClientID + "|" + req.Kid))
 	}
 
 	ke2Bytes, clientMAC, sessionSecret, err := d.opaque.AuthEvaluate(reqData, record)
@@ -242,7 +255,6 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, p
 		Context:    req.Context,
 		SessionKey: sessionSecret,
 		ClientMAC:  clientMAC,
-		Task:       pakeReq.Task,
 		ExpiresAt:  time.Now().Add(d.sessionTTL),
 	}
 
@@ -251,15 +263,13 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, p
 	}
 
 	pakeResp := r2ps.PAKEResponse{
-		PakeSessionID:         sessionID,
-		Resp:                  base64.URLEncoding.EncodeToString(ke2Bytes),
-		Task:                  pakeReq.Task,
-		SessionExpirationTime: sess.ExpiresAt.Unix(),
+		PakeSessionID: sessionID,
+		Resp:          base64.URLEncoding.EncodeToString(ke2Bytes),
 	}
 	return d.encryptAndSign(req, &pakeResp)
 }
 
-func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.PAKERequest, reqData []byte) ([]byte, error) {
+func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, pakeReq *r2ps.PAKERequest, reqData []byte) ([]byte, error) {
 	sess := d.sessions.Get(req.PakeSessionID)
 	if sess == nil {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalState, Msg: "session not found or expired"}
@@ -280,9 +290,21 @@ func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, _
 	PAKEAuthTotal.WithLabelValues("success").Inc()
 	ActiveSessions.Inc()
 
+	// Apply task and session_duration from finalize request (per spec)
+	if pakeReq.Task != "" {
+		sess.Task = pakeReq.Task
+	}
+	if pakeReq.SessionDuration > 0 {
+		requested := time.Duration(pakeReq.SessionDuration) * time.Second
+		if requested < d.sessionTTL {
+			sess.ExpiresAt = time.Now().Add(requested)
+		}
+	}
+
 	pakeResp := r2ps.PAKEResponse{
 		PakeSessionID:         req.PakeSessionID,
 		Msg:                   "authenticated",
+		Task:                  pakeReq.Task,
 		SessionExpirationTime: sess.ExpiresAt.Unix(),
 	}
 	return d.encryptAndSign(req, &pakeResp)
@@ -338,7 +360,7 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal response failed"}
 	}
 
-	signed, err := icrypto.SignJWS(respJSON, d.serverKey, "")
+	signed, err := icrypto.SignJWS(respJSON, d.serverKey, "", "r2ps-response+json")
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "sign response failed"}
 	}
@@ -386,7 +408,7 @@ func (d *Dispatcher) encryptAndSign(req *r2ps.ServiceRequest, pakeResp *r2ps.PAK
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal response failed"}
 	}
 
-	signed, err := icrypto.SignJWS(svcJSON, d.serverKey, "")
+	signed, err := icrypto.SignJWS(svcJSON, d.serverKey, "", "r2ps-response+json")
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "sign response failed"}
 	}

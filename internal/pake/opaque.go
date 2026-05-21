@@ -108,3 +108,14 @@ func (s *OPAQUEServer) AuthFinalize(ke3Bytes []byte, expectedClientMAC []byte) e
 
 	return s.server.LoginFinish(ke3, expectedClientMAC)
 }
+
+// FakeRecord returns a fake ClientRecord for the given credential identifier.
+// This is used when the client_id is unknown, to prevent client enumeration.
+func (s *OPAQUEServer) FakeRecord(credentialID []byte) *opaque.ClientRecord {
+	record, err := OPAQUEConfig.GetFakeRecord(credentialID)
+	if err != nil {
+		// Fallback: this should never fail with valid config
+		record, _ = OPAQUEConfig.GetFakeRecord(credentialID)
+	}
+	return record
+}

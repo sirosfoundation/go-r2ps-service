@@ -1,42 +1,36 @@
-# R2PS Protocol Specification
+# Remote PAKE-Protected Services Protocol (R2PS)
 
-**Version:** 1.0  
-**Status:** Implementation Draft  
-**Date:** 2026-05-20
+**Version:** 1.0
+**Status:** Implementation Draft
+**Date:** 2026-05-21
+**Normative Reference:** `security/rp2s-peter.md`
 
 ## 1. Introduction
 
-R2PS (Remote PAKE-Protected Services) is a protocol for secure remote access
-to Hardware Security Module (HSM) key operations.  It provides:
+The R2PS protocol lets constrained clients offload critical service operations
+to a secure server environment. The protocol is generic and can support any
+client application, but its primary target is remote-WSCD solutions.
 
-- **PIN-based authentication** using the OPAQUE augmented PAKE protocol
-  (RFC 9497), so that the server never learns the user's PIN.
-- **End-to-end encryption** of all service data using JWE (RFC 7516).
-- **JWS integrity** (RFC 7515) on every request and response.
-- **Session management** with configurable TTL, lockout, and cleanup.
+The same remote-server architecture also supports:
 
-The protocol is designed for use by EUDI Wallet instances that delegate
-cryptographic key operations (ECDSA signing, ECDH key agreement, key
-generation) to a remote WSCD (Wallet Secure Cryptographic Device).
+- Multi-device access to a single wallet instance
+- Private storage of client data
+- Audit logging
 
-### 1.1 Terminology
+### 1.1 Encryption Modes
 
-| Term | Definition |
-|------|-----------|
-| **Client** | The wallet application initiating requests. |
-| **Server** | The R2PS service managing HSM key operations. |
-| **HSM** | Hardware Security Module accessed via PKCS#11. |
-| **kid** | Key identifier — a 32-character hex string derived from `SHA-256(compressed_public_key)[:16]`. |
-| **context** | A namespace for grouping keys and sessions (e.g. `"signing"`). |
-| **client_id** | A stable identifier for the wallet instance (e.g. a URI). |
-| **PAKE session** | A session established by OPAQUE authentication, carrying a shared session key. |
+R2PS defines two modes for encrypting service data:
 
-### 1.2 Conventions
+**Device-authenticated encryption** uses ephemeral-static ECDH as defined for
+JWE in RFC 7518. The client encrypts to the server's static public key; the
+server encrypts to the client's public context key. This mode applies to
+services that must operate before a user-authenticated key has been
+established (notably PAKE exchanges). It proves the possession factor.
 
-- All binary values in JSON are encoded as base64url (RFC 4648 §5) **with padding**.
-- All timestamps (`iat`, `session_expiration_time`) are Unix epoch seconds.
-- JWS uses compact serialization with content type `JOSE`.
-- JWE uses compact serialization with content type `application/octet-stream`.
+**User-authenticated encryption** uses a key negotiated through a PAKE
+exchange that binds the key to the user's PIN. The RECOMMENDED configuration
+is OPAQUE combined with Device-Enhanced PIN hardening (§3.3.2 of the normative
+reference).
 
 ## 2. Transport
 
@@ -49,20 +43,16 @@ POST /r2ps
 Content-Type: application/jose
 ```
 
-The request body is a JWS compact serialization.  The response body is either:
-
-- **Success:** JWS compact serialization (`Content-Type: application/jose`,
-  HTTP 200).
-- **Error:** JSON error object (`Content-Type: application/json`,
-  HTTP 4xx/5xx).
-
-The server enforces a maximum request body size of 1 MB.
+- A successful response SHALL be returned with HTTP 200 and `Content-Type: application/jose`.
+- On failure, the server SHALL return an error response (§3.2) with the
+  appropriate HTTP status code and `Content-Type: application/json`.
+- The server enforces a maximum request body size of 1 MB.
 
 ### 2.2 TLS
 
-The server supports direct TLS termination (configured via `R2PS_TLS_CERT`
-and `R2PS_TLS_KEY`) or may run behind a TLS-terminating reverse proxy.
-TLS 1.2 is the minimum supported version.
+TLS 1.2 is the minimum supported version. The server supports direct TLS
+termination (configured via `R2PS_TLS_CERT` and `R2PS_TLS_KEY`) or may run
+behind a TLS-terminating reverse proxy.
 
 ### 2.3 Observability Endpoints
 
@@ -72,527 +62,291 @@ TLS 1.2 is the minimum supported version.
 | `/readyz` | GET | Readiness probe — probes HSM connectivity |
 | `/metrics` | GET | Prometheus metrics |
 
-## 3. Message Format
+## 3. Protocol
 
-### 3.1 Envelope Structure
+### 3.1 Service Request and Response
 
-Every R2PS exchange follows the same envelope pattern:
+Service requests and responses take the form of a JWS [RFC 7515] in compact
+serialization. The JWS payload is a JSON object whose parameters are defined
+below.
 
-1. The sender constructs a **service request/response** JSON object.
-2. The JSON is signed as a **JWS** (ES256/ES384/ES512) in compact serialization.
-3. The JWS is sent as the HTTP body.
+#### 3.1.1 Common Request/Response Parameters
 
-The JWS payload contains an inner `data` field that carries the
-operation-specific data as an encrypted JWE compact serialization string.
+The following parameters MUST be present in both service requests and
+service responses:
 
-#### 3.1.1 Cryptographic Algorithms
-
-| Purpose | Algorithm | Notes |
-|---------|-----------|-------|
-| JWS signing | ES256, ES384, ES512 | Selected by key curve |
-| JWE key agreement (device mode) | ECDH-ES+A256KW | Ephemeral-static ECDH |
-| JWE content encryption | A256GCM | |
-| JWE symmetric (user mode) | dir + A256GCM | Key from OPAQUE session |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ver` | string | Protocol version. SHALL be `"1.0"`. |
+| `nonce` | byte array | Random value included in request and echoed in response. |
+| `iat` | integer | Unix timestamp at time of creation. |
+| `enc` | string | Encryption mode: `"user"` or `"device"`. |
+| `data` | byte array | JWE-encrypted service data in compact serialization. |
 
 #### 3.1.2 Service Request
 
-```json
-{
-  "ver": "1.0",
-  "nonce": "<base64url random>",
-  "iat": 1700000000,
-  "enc": "device" | "user",
-  "data": "<JWE compact serialization>",
-  "client_id": "https://example.com/wallet/1",
-  "kid": "a1b2c3d4e5f6...",
-  "context": "signing",
-  "type": "<service type>",
-  "pake_session_id": "<session ID, if authenticated>"
-}
-```
+Additional parameters MUST be present in service requests:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `ver` | string | Yes | Protocol version. Must be `"1.0"`. |
-| `nonce` | string | Yes | Client-generated random nonce (base64url). Echoed in the response. |
-| `iat` | integer | Yes | Issued-at timestamp (Unix seconds). |
-| `enc` | string | Yes | Encryption mode for `data`. See §3.1.4. |
-| `data` | string | Yes | JWE compact serialization of the operation payload. |
-| `client_id` | string | Yes | Stable client identifier. |
-| `kid` | string | Yes | Key identifier for the target key. |
-| `context` | string | Yes | Namespace for the operation. |
-| `type` | string | Yes | Service type identifier. See §4 and §5. |
-| `pake_session_id` | string | Conditional | Required for `enc=user` requests and authentication finalize. |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `client_id` | string | Identifies the client entity. |
+| `kid` | string | Key identifier for the context key used by this client on the current device. |
+| `context` | string | Security context under which the request is made. |
+| `type` | string | Service type identifier. |
+| `pake_session_id` | string | Identifies the PAKE-authenticated session. |
+
+These parameters give the server the information needed to:
+
+- `context` → route to the backend resource for this security context.
+- `client_id` → retrieve all records associated with the client account.
+- `kid` → identify the client public key used to establish a PAKE session;
+  also used by default to validate the JWS signature.
+- `pake_session_id` → locate the session holding the decryption key.
+- `type` → identify the expected structure of the decrypted service data.
+
+A service request MUST include the `typ` header parameter with value
+`"r2ps-request+json"`.
 
 #### 3.1.3 Service Response
 
-```json
-{
-  "ver": "1.0",
-  "nonce": "<echoed from request>",
-  "iat": 1700000000,
-  "enc": "device" | "user",
-  "data": "<JWE compact serialization>"
-}
-```
+A service response is bound to its request by echoing the `nonce` value.
+The server MUST ensure the request `nonce` provides at least 64 bits of
+entropy.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ver` | string | Protocol version. |
-| `nonce` | string | Echoed from the request. |
-| `iat` | integer | Server-issued timestamp. |
-| `enc` | string | Encryption mode matching the response context. |
-| `data` | string | JWE compact serialization of the response payload. |
+A service response MUST include all common parameters defined in §3.1.1.
 
-#### 3.1.4 Encryption Modes
+A service response MUST NOT include the additional request parameters
+(`client_id`, `kid`, `context`, `type`, `pake_session_id`).
 
-| Mode | Value | Key Source | Used For |
-|------|-------|-----------|----------|
-| **Device** | `"device"` | ECDH-ES+A256KW with server's static public key | PAKE registration and authentication |
-| **User** | `"user"` | Direct keying with OPAQUE session key (first 32 bytes) | Authenticated service requests |
-
-In **device** mode, the client encrypts the `data` field to the server's
-static EC public key using ECDH-ES+A256KW (with an ephemeral client key).
-The server decrypts using its corresponding private key.
-
-In **user** mode, both client and server use the shared session key
-derived from the OPAQUE AKE exchange.  The key is used as a direct
-symmetric key with A256GCM content encryption.
+A service response MUST include the `typ` header parameter with value
+`"r2ps-response+json"`.
 
 ### 3.2 Error Response
 
-On failure, the server returns a JSON error instead of a JWS:
+If the server fails to process a service request, it MUST respond with an
+appropriate HTTP error code and a structured error response:
 
 ```json
 {
-  "error_code": "UNAUTHORIZED",
-  "error_message": "session not found or expired"
+  "error_code": "ACCESS_DENIED",
+  "error_message": "The service type 'hsm_ecdsa' under context 'test' is not supported"
 }
 ```
 
-| Error Code | HTTP Status | Meaning |
-|------------|-------------|---------|
-| `ILLEGAL_REQUEST_DATA` | 400 | Malformed request, bad JWS, decryption failure |
-| `ILLEGAL_STATE` | 400 | Invalid type/state combination |
-| `UNSUPPORTED_REQUEST_TYPE` | 400 | Unknown service type |
-| `UNAUTHORIZED` | 401 | Authentication failed or session invalid |
-| `ACCESS_DENIED` | 403 | Account locked due to failed attempts |
-| `SERVER_ERROR` | 500 | Internal server error |
-| `TRY_LATER` | 503 | Service temporarily unavailable |
+| Response Code | HTTP Status |
+|---------------|-------------|
+| `ILLEGAL_REQUEST_DATA` | 400 |
+| `UNAUTHORIZED` | 401 |
+| `ACCESS_DENIED` | 403 |
+| `ILLEGAL_STATE` | 409 |
+| `UNSUPPORTED_REQUEST_TYPE` | 415 |
+| `SERVER_ERROR` | 500 |
+| `TRY_LATER` | 503 |
+
+> **Note**: The server MUST NOT return an error when receiving an unknown
+> `client_id`. Instead, the server completes the response using a fake client
+> record with a randomly generated public key and masking key.
 
 Error messages are intentionally generic and never expose HSM internals,
 key identifiers, or PKCS#11 error codes.
 
-## 4. PAKE Authentication
+### 3.3 PAKE Exchanges
 
-All service requests (§5) require an authenticated session.  Sessions are
-established using the OPAQUE protocol (RFC 9497) with the P256Sha256
-cipher suite.
+PAKE processing is handled through the following service types:
 
-### 4.1 PAKE Data Structures
+| Service Type | Encryption Mode | Purpose |
+|--------------|----------------|---------|
+| `pin_registration` | `device` | Register a new PIN for a security context |
+| `pin_change` | `user` | Replace an existing PIN with a new one |
+| `authenticate` | `device` | Establish a PAKE session |
 
-#### 4.1.1 PAKE Request (inner `data` payload)
+The `device` mode ensures PIN-based operations proceed only after the
+possession factor has been established.
 
-```json
-{
-  "protocol": "opaque",
-  "state": "evaluate" | "finalize",
-  "authorization": "<optional>",
-  "task": "<optional task identifier>",
-  "session_duration": 300,
-  "req": "<base64url-encoded OPAQUE message>"
-}
-```
+The `user` mode ensures PIN changes proceed only after the knowledge
+factor has been established.
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `protocol` | string | Yes | Must be `"opaque"`. |
-| `state` | string | Yes | Phase of the PAKE exchange. |
-| `authorization` | string | No | Optional authorization token. |
-| `task` | string | No | Task binding for the session. |
-| `session_duration` | integer | No | Requested session duration in seconds. |
-| `req` | string | Yes | Base64url-encoded OPAQUE protocol message. |
+#### 3.3.1 PAKE Data Structures
 
-#### 4.1.2 PAKE Response (inner `data` payload)
+##### 3.3.1.1 PAKE Request Data Structure
 
-```json
-{
-  "pake_session_id": "<session identifier>",
-  "resp": "<base64url-encoded OPAQUE message>",
-  "msg": "<human-readable status>",
-  "task": "<echoed task>",
-  "session_expiration_time": 1700000300
-}
-```
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `protocol` | string | Identifier of the PAKE protocol in use. |
+| `state` | string | Current state of the PAKE protocol exchange. |
+| `authorization` | byte array | Authorization data for new PIN registrations. |
+| `task` | string | Requested session task. |
+| `session_duration` | integer | Requested maximum session duration in seconds. |
+| `req` | byte array | PAKE request data. |
 
-| Field | Type | Presence | Description |
-|-------|------|----------|-------------|
-| `pake_session_id` | string | Conditional | Session ID, returned in auth-evaluate. |
-| `resp` | string | Conditional | Base64url-encoded OPAQUE response message. |
-| `msg` | string | Conditional | Status message (e.g. `"registration complete"`, `"authenticated"`). |
-| `task` | string | Conditional | Echoed task identifier. |
-| `session_expiration_time` | integer | Conditional | Unix timestamp when the session expires. |
+The `authorization` parameter asserts that the client is authorized to set
+a PIN. The mechanism is outside the scope of this specification.
 
-### 4.2 PIN Registration
+##### 3.3.1.2 PAKE Response Data Structure
 
-PIN registration stores the user's OPAQUE credential on the server without
-the server ever learning the PIN.  It is a two-phase exchange.
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `pake_session_id` | string | Session identifier. |
+| `resp` | byte array | PAKE response data. |
+| `msg` | string | Human-readable message. |
+| `task` | string | Confirms the session task. |
+| `session_expiration_time` | integer | Session expiry as Unix timestamp. |
 
-The credential identifier is `client_id + "|" + kid`.
+#### 3.3.2 Device-Enhanced PIN
 
-#### Phase 1: Evaluate
+Implementations SHOULD use Device-Enhanced PIN (DE-PIN) to strengthen the
+PAKE protocol. The RECOMMENDED algorithm:
 
 ```
-Client                                    Server
-  |                                         |
-  |  type=pin_registration, state=evaluate  |
-  |  req = RegistrationRequest.Serialize()  |
-  |---------------------------------------->|
-  |                                         |  RegistrationResponse(req, credID)
-  |  resp = RegistrationResponse            |
-  |<----------------------------------------|
+DE-PIN = HKDF(ECDH(prv, hash2Curve(PIN)))
 ```
 
-#### Phase 2: Finalize
+where `prv` is the device-protected private key for the intended `context`
+and `hash2Curve()` is defined in [RFC 9380].
 
-```
-Client                                    Server
-  |                                         |
-  |  type=pin_registration, state=finalize  |
-  |  req = RegistrationRecord.Serialize()   |
-  |---------------------------------------->|
-  |                                         |  PutRecord(clientID, kid, record)
-  |  msg = "registration complete"          |
-  |<----------------------------------------|
-```
+#### 3.3.3 OPAQUE as PAKE Protocol
 
-### 4.3 Authentication
+When OPAQUE [RFC 9807] is used, it is identified by the protocol identifier
+`"opaque"`.
 
-Authentication establishes a shared session key using the OPAQUE AKE
-(Authenticated Key Exchange).  It is a two-phase exchange.
+OPAQUE uses the following states:
 
-#### Phase 1: Evaluate (KE1 → KE2)
+| State | Description |
+|-------|-------------|
+| `evaluate` | Server evaluates blinded OPRF data (registration) or generates KE2 (auth). |
+| `finalize` | Client sends RegistrationRecord (registration) or KE3 (auth). |
 
-```
-Client                                    Server
-  |                                         |
-  |  type=authenticate, state=evaluate      |
-  |  req = KE1.Serialize()                  |
-  |  task = "<optional task>"               |
-  |---------------------------------------->|
-  |                                         |  Check lockout
-  |                                         |  GetRecord(clientID, kid)
-  |                                         |  GenerateKE2(ke1, record)
-  |                                         |  Create session (unverified)
-  |  pake_session_id = "<session ID>"       |
-  |  resp = KE2                             |
-  |  session_expiration_time = <unix>       |
-  |<----------------------------------------|
-```
+##### 3.3.3.1 OPAQUE PIN Registration
 
-#### Phase 2: Finalize (KE3 → verified)
+**Evaluate request:** `protocol: "opaque"`, `state: "evaluate"`, `req: <RegistrationRequest>`
 
-```
-Client                                    Server
-  |                                         |
-  |  type=authenticate, state=finalize      |
-  |  pake_session_id = "<from phase 1>"     |
-  |  req = KE3.Serialize()                  |
-  |---------------------------------------->|
-  |                                         |  Verify KE3 MAC
-  |                                         |  On failure: increment counter, delete session
-  |                                         |  On success: mark session verified, reset counter
-  |  pake_session_id = "<confirmed>"        |
-  |  msg = "authenticated"                  |
-  |  session_expiration_time = <unix>       |
-  |<----------------------------------------|
-```
+**Evaluate response:** `resp: <RegistrationResponse>`
 
-After successful authentication, both client and server hold the same
-session key (the OPAQUE session secret).  The first 32 bytes of this key
-are used as the A256GCM symmetric key for `enc=user` requests.
+**Finalize request:** `protocol: "opaque"`, `state: "finalize"`, `authorization: <auth data>`, `req: <RegistrationRecord>`
 
-### 4.4 Lockout Policy
+**Finalize response:** `msg: "OK"`
 
-The server tracks failed authentication attempts per `(client_id, kid,
-context)` tuple.  After a configurable number of failures (default: 5),
-the account is locked for a configurable duration (default: 15 minutes).
-Successful authentication resets the failure counter.
+The registration is stateless. The `authorization` parameter MUST be
+included in the `finalize` state on initial PIN registration.
 
-### 4.5 Session Lifecycle
+##### 3.3.3.2 OPAQUE Authentication
 
-- Sessions have a configurable TTL (default: 5 minutes).
-- A background goroutine runs at a configurable interval (default: 1
-  minute) to clean up expired sessions.
-- Sessions are created in an **unverified** state during auth-evaluate and
-  marked **verified** after successful auth-finalize.
-- Only verified sessions can be used for service requests.
-- Failed auth-finalize immediately deletes the session.
+**Evaluate request:** `protocol: "opaque"`, `state: "evaluate"`, `req: <KE1>`
 
-## 5. Service Types
+**Evaluate response:** `pake_session_id: <id>`, `resp: <KE2>`
+
+**Finalize request:** `protocol: "opaque"`, `state: "finalize"`, `task: <task>`, `session_duration: <seconds>`, `req: <KE3>`
+
+**Finalize response:** `pake_session_id: <id>`, `task: <echoed>`, `session_expiration_time: <unix>`, `msg: "OK"`
+
+> **Note 1**: `session_duration` is the maximum permitted lifetime. The server
+> sets `session_expiration_time` to no later than `session_duration` seconds
+> from the current time, but MAY set it shorter.
+
+> **Note 2**: The `task` identifier allows the server to enforce controls such
+> as rejecting requests inconsistent with the declared task or closing sessions
+> after task completion.
+
+> **Note 3**: Before generating the finalize response, the server MUST verify
+> the client authentication material.
+
+The server SHOULD only echo `task` if it recognizes the identifier.
+
+##### 3.3.3.3 OPAQUE PIN Change
+
+PIN change proceeds as:
+
+1. Establish a new PAKE session under the existing PIN (`authenticate`)
+2. Perform a `pin_change` registration exchange encrypted under that session key
+
+Once complete, the old session SHOULD be invalidated.
+
+## 4. Service Types (HSM Profile)
 
 Once authenticated, the client sends service requests with `enc=user`.
-The `data` field contains a JWE encrypted with the session key.  The
-decrypted payload is a JSON object specific to the service type.
+All service requests require a verified PAKE session.
 
-All service requests require a verified PAKE session (`pake_session_id`
-must reference an active, verified session).
-
-### 5.1 EC Key Generation (`hsm_ec_keygen`)
-
-Generates a new EC key pair in the HSM.
+### 4.1 EC Key Generation (`hsm_ec_keygen`)
 
 **Request:**
-
 ```json
-{
-  "curve": "P-256"
-}
+{ "curve": "P-256" }
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `curve` | string | EC curve name: `"P-256"`, `"P-384"`, or `"P-521"`. |
 
 **Response:**
-
 ```json
-{
-  "kid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-  "pub_key": "<base64url compressed public key>"
-}
+{ "kid": "<hex>", "pub_key": "<base64url compressed>" }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `kid` | string | Key identifier (32-char hex, derived from SHA-256 of the public key). |
-| `pub_key` | string | Base64url-encoded compressed EC public key (SEC 1, §2.3.3). |
+The `kid` is computed as `hex(SHA-256(compressed_public_key)[:16])`.
 
-The `kid` is computed as `hex(SHA-256(compressed_public_key)[:16])` and
-stored as the PKCS#11 `CKA_ID` attribute on both the public and private
-key objects.
-
-### 5.2 ECDSA Signing (`hsm_ecdsa`)
-
-Signs a pre-computed hash using a key in the HSM.
+### 4.2 ECDSA Signing (`hsm_ecdsa`)
 
 **Request:**
-
 ```json
-{
-  "kid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-  "hash": "<base64url hash>"
-}
+{ "kid": "<key id>", "hash": "<base64url hash>" }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `kid` | string | Key identifier (must match `^[a-zA-Z0-9_-]{1,128}$`). |
-| `hash` | string | Base64url-encoded hash. Must be 32 (SHA-256), 48 (SHA-384), or 64 (SHA-512) bytes. |
+Hash must be 32 (SHA-256), 48 (SHA-384), or 64 (SHA-512) bytes.
 
 **Response:**
-
 ```json
-{
-  "signature": "<base64url ASN.1 DER signature>"
-}
+{ "signature": "<base64url ASN.1 DER signature>" }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `signature` | string | Base64url-encoded ECDSA signature in ASN.1 DER format. |
-
-The server performs `CKM_ECDSA` signing via PKCS#11.  If the HSM returns
-a raw R||S signature, it is converted to ASN.1 DER.  If the HSM returns
-ASN.1 DER directly, it is passed through unchanged.
-
-### 5.3 ECDH Key Agreement (`hsm_ecdh`)
-
-Performs ECDH key agreement between an HSM-resident key and a peer public key.
+### 4.3 ECDH Key Agreement (`hsm_ecdh`)
 
 **Request:**
-
 ```json
-{
-  "kid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-  "peer_pub_key": "<base64url peer public key>"
-}
+{ "kid": "<key id>", "peer_pub_key": "<base64url peer key>" }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `kid` | string | Key identifier. |
-| `peer_pub_key` | string | Base64url-encoded peer EC public key (compressed or uncompressed). |
-
-Valid peer key sizes (bytes):
-
-| Curve | Compressed | Uncompressed |
-|-------|-----------|--------------|
-| P-256 | 33 | 65 |
-| P-384 | 49 | 97 |
-| P-521 | 67 | 133 |
+Peer key may be compressed or uncompressed.
 
 **Response:**
-
 ```json
-{
-  "shared_secret": "<base64url shared secret>"
-}
+{ "shared_secret": "<base64url shared secret>" }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `shared_secret` | string | Base64url-encoded raw ECDH shared secret (x-coordinate). Length equals the curve's field size. |
-
-The server uses `CKM_ECDH1_DERIVE` with `CKD_NULL`.  If the peer key is
-in compressed form, the server decompresses it before passing it to the
-HSM.  The derived secret key object is extracted and immediately destroyed.
-
-### 5.4 List Keys (`hsm_list_keys`)
-
-Lists EC keys available in the HSM.
+### 4.4 List Keys (`hsm_list_keys`)
 
 **Request:**
-
 ```json
-{
-  "curves": ["P-256", "P-384"]
-}
+{ "curves": ["P-256", "P-384"] }
 ```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `curves` | string[] | Optional filter by curve name.  If omitted or empty, all EC keys are returned. |
 
 **Response:**
-
 ```json
-{
-  "keys": [
-    {
-      "kid": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-      "curve": "P-256",
-      "pub_key": "<base64url compressed public key>"
-    }
-  ]
-}
+{ "keys": [{"kid": "...", "curve": "P-256", "pub_key": "..."}] }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `keys` | array | List of key info objects. |
-| `keys[].kid` | string | Key identifier (CKA_ID). |
-| `keys[].curve` | string | Curve name (derived from CKA_EC_PARAMS OID). |
-| `keys[].pub_key` | string | Compressed public key bytes (not base64url — raw bytes in JSON). |
+## 5. Security Considerations
 
-## 6. Protocol Flow Summary
+### 5.1 PIN Protection
 
-A complete interaction from registration through service use:
+The OPAQUE protocol ensures the server never learns the user's PIN.
 
-```
-Client                                         Server
-  |                                              |
-  |  === PIN Registration (one-time setup) ===   |
-  |                                              |
-  |  POST /r2ps  [JWS]                          |
-  |  type=pin_registration, state=evaluate       |
-  |  enc=device, data=JWE(RegistrationRequest)   |
-  |--------------------------------------------->|
-  |                                              |
-  |  [JWS]                                      |
-  |  enc=device, data=JWE(RegistrationResponse)  |
-  |<---------------------------------------------|
-  |                                              |
-  |  POST /r2ps  [JWS]                          |
-  |  type=pin_registration, state=finalize       |
-  |  enc=device, data=JWE(RegistrationRecord)    |
-  |--------------------------------------------->|
-  |                                              |  Store record
-  |  [JWS]                                      |
-  |  msg="registration complete"                 |
-  |<---------------------------------------------|
-  |                                              |
-  |  === Authentication ===                      |
-  |                                              |
-  |  POST /r2ps  [JWS]                          |
-  |  type=authenticate, state=evaluate           |
-  |  enc=device, data=JWE(KE1)                   |
-  |--------------------------------------------->|
-  |                                              |
-  |  [JWS]                                      |
-  |  pake_session_id, resp=KE2                   |
-  |<---------------------------------------------|
-  |                                              |
-  |  POST /r2ps  [JWS]                          |
-  |  type=authenticate, state=finalize           |
-  |  enc=device, pake_session_id, data=JWE(KE3)  |
-  |--------------------------------------------->|
-  |                                              |  Verify MAC
-  |  [JWS]                                      |  Mark session verified
-  |  msg="authenticated"                         |
-  |<---------------------------------------------|
-  |                                              |
-  |  === Service Request (e.g. ECDSA sign) ===   |
-  |                                              |
-  |  POST /r2ps  [JWS]                          |
-  |  type=hsm_ecdsa, enc=user                    |
-  |  pake_session_id                              |
-  |  data=JWE_symmetric({"kid":"...","hash":"."}) |
-  |--------------------------------------------->|
-  |                                              |  Verify session
-  |                                              |  Decrypt with session key
-  |                                              |  HSM sign operation
-  |  [JWS]                                      |
-  |  enc=user, data=JWE_symmetric({"signature"})  |
-  |<---------------------------------------------|
-```
+### 5.2 Unknown Client Handling
 
-## 7. Security Considerations
+The server MUST NOT return an error for unknown `client_id`. It completes
+the response using a fake record to prevent client enumeration.
 
-### 7.1 PIN Protection
+### 5.3 Error Sanitization
 
-The OPAQUE protocol ensures the server never learns the user's PIN.  The
-server stores only an OPAQUE registration record (containing a masked
-credential and public key envelope) from which the PIN cannot be recovered.
+Internal details (PKCS#11 error codes, key identifiers, HSM module paths)
+are logged at DEBUG level and never included in protocol responses.
 
-### 7.2 Session Key Derivation
+### 5.4 Brute-Force Protection
 
-The session key is the OPAQUE session secret, derived during the
-Authenticated Key Exchange.  Both parties compute it independently and
-verify consistency via KE3 MAC verification.  Only the first 32 bytes
-are used for A256GCM encryption.
+Per-`(client_id, kid, context)` lockout after configurable failed attempts
+(default: 5 failures, 15-minute lockout).
 
-### 7.3 Error Sanitization
+### 5.5 Panic Recovery
 
-All error messages returned to clients are generic.  Internal details
-(PKCS#11 error codes, key identifiers, HSM module paths) are logged at
-DEBUG level and never included in protocol responses.
+Infrastructure panics (HSM pool, PAKE store) cause process exit.
+Request-scoped panics are recovered and return a generic error.
 
-### 7.4 Brute-Force Protection
-
-The server implements per-`(client_id, kid, context)` lockout after a
-configurable number of failed authentication attempts (default: 5 failures,
-15-minute lockout).  Successful authentication resets the counter.
-
-### 7.5 Request Size Limits
-
-The server limits request bodies to 1 MB to prevent resource exhaustion.
-
-### 7.6 HSM Timeout
-
-All HSM operations are subject to a configurable timeout (default: 5
-seconds) enforced via Go context cancellation.
-
-### 7.7 Panic Recovery
-
-The server recovers from panics in request handlers and returns a generic
-error.  However, panics originating in infrastructure code (HSM session
-pool, PAKE session store) cause the process to exit so the orchestration
-layer can restart a clean instance.
-
-## 8. OPAQUE Configuration
-
-The implementation uses the following OPAQUE cipher suite:
+## 6. OPAQUE Configuration
 
 | Parameter | Value |
 |-----------|-------|
@@ -602,10 +356,7 @@ The implementation uses the following OPAQUE cipher suite:
 | MAC | SHA-256 (HMAC) |
 | Hash | SHA-256 |
 
-This corresponds to the `bytemare/opaque` library configuration with
-`opaque.P256Sha256` for both OPRF and AKE groups.
-
-## 9. Configuration Reference
+## 7. Configuration Reference
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -614,12 +365,12 @@ This corresponds to the `bytemare/opaque` library configuration with
 | `R2PS_HSM_PIN` | *(required)* | HSM user PIN |
 | `R2PS_HSM_TOKEN_LABEL` | | Find HSM slot by token label |
 | `R2PS_HSM_SLOT` | *(auto)* | HSM slot number |
-| `R2PS_HSM_POOL_SIZE` | `4` | Number of concurrent PKCS#11 sessions |
+| `R2PS_HSM_POOL_SIZE` | `4` | Concurrent PKCS#11 sessions |
 | `R2PS_HSM_TIMEOUT` | `5s` | Timeout for HSM operations |
 | `R2PS_TLS_CERT` | | TLS certificate file |
 | `R2PS_TLS_KEY` | | TLS private key file |
 | `R2PS_MAX_ATTEMPTS` | `5` | Failed auth attempts before lockout |
-| `R2PS_LOCKOUT_DURATION` | `15m` | Lockout duration after max failures |
+| `R2PS_LOCKOUT_DURATION` | `15m` | Lockout duration |
 | `R2PS_SESSION_TTL` | `5m` | PAKE session time-to-live |
-| `R2PS_LOG_LEVEL` | `WARN` | Log level: DEBUG, INFO, WARN, ERROR |
+| `R2PS_LOG_LEVEL` | `WARN` | Log level |
 | `R2PS_LOG_FORMAT` | `text` | Log format: `text` or `json` |

@@ -39,9 +39,9 @@ func TestMapErrorStatus(t *testing.T) {
 	}{
 		{"UNAUTHORIZED", http.StatusUnauthorized},
 		{"ACCESS_DENIED", http.StatusForbidden},
-		{"UNSUPPORTED_REQUEST_TYPE", http.StatusBadRequest},
+		{"UNSUPPORTED_REQUEST_TYPE", http.StatusUnsupportedMediaType},
 		{"ILLEGAL_REQUEST_DATA", http.StatusBadRequest},
-		{"ILLEGAL_STATE", http.StatusBadRequest},
+		{"ILLEGAL_STATE", http.StatusConflict},
 		{"TRY_LATER", http.StatusServiceUnavailable},
 		{"SERVER_ERROR", http.StatusInternalServerError},
 		{"UNKNOWN", http.StatusInternalServerError},
