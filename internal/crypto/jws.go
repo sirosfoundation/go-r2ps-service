@@ -59,6 +59,32 @@ func VerifyJWS(compact string, key *ecdsa.PublicKey) ([]byte, error) {
 	return payload, nil
 }
 
+// PeekJWSHeaders parses a JWS compact serialization and returns the protected
+// headers without verifying the signature. This is used to extract kid before
+// looking up the verification key.
+func PeekJWSHeaders(compact string) (map[string]interface{}, error) {
+	jws, err := jose.ParseSigned(compact, []jose.SignatureAlgorithm{jose.ES256, jose.ES384, jose.ES512})
+	if err != nil {
+		return nil, fmt.Errorf("parse JWS: %w", err)
+	}
+
+	if len(jws.Signatures) == 0 {
+		return nil, errors.New("no signatures in JWS")
+	}
+
+	headers := make(map[string]interface{})
+	h := jws.Signatures[0].Protected
+	if h.KeyID != "" {
+		headers["kid"] = h.KeyID
+	}
+	if v, ok := h.ExtraHeaders[jose.HeaderType]; ok {
+		if s, ok := v.(string); ok && s != "" {
+			headers["typ"] = s
+		}
+	}
+	return headers, nil
+}
+
 // GenerateECKey generates a new ECDSA key pair for the given curve.
 func GenerateECKey(curve elliptic.Curve) (*ecdsa.PrivateKey, error) {
 	return ecdsa.GenerateKey(curve, rand.Reader)

@@ -220,6 +220,7 @@ func TestProcessUnsupportedType(t *testing.T) {
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:   r2ps.ProtocolVersion,
 		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
 		Type:  "unknown_type",
 		Enc:   r2ps.EncUser,
 	})
@@ -237,6 +238,7 @@ func TestProcessServiceRequiresUserEnc(t *testing.T) {
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:   r2ps.ProtocolVersion,
 		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
 		Type:  r2ps.TypeHSMECKeygen,
 		Enc:   r2ps.EncDevice,
 	})
@@ -254,6 +256,7 @@ func TestProcessServiceRequiresSession(t *testing.T) {
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:           r2ps.ProtocolVersion,
 		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:           time.Now().Unix(),
 		Type:          r2ps.TypeHSMECKeygen,
 		Enc:           r2ps.EncUser,
 		PakeSessionID: "nonexistent",
@@ -602,5 +605,123 @@ func TestDecryptRequestDataUnsupportedEnc(t *testing.T) {
 	_, err := d.decryptRequestData(&r2ps.ServiceRequest{Enc: "invalid"})
 	if err == nil {
 		t.Fatal("expected error for unsupported enc mode")
+	}
+}
+
+func TestProcessIatValidation(t *testing.T) {
+	d, key, _ := setupDispatcher(t)
+
+	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Add(-10 * time.Minute).Unix(), // 10 min in the past
+		Type:  r2ps.TypeHSMECKeygen,
+		Enc:   r2ps.EncUser,
+	})
+
+	_, err := d.Process(context.Background(), body)
+	r2psErr := err.(*R2PSError)
+	if r2psErr.Code != r2ps.ErrIllegalRequestData {
+		t.Errorf("code = %q, want ILLEGAL_REQUEST_DATA", r2psErr.Code)
+	}
+}
+
+func TestPINChangeRequiresUserEnc(t *testing.T) {
+	d, key, _ := setupDispatcher(t)
+
+	pakeReq := r2ps.PAKERequest{
+		Protocol: r2ps.PAKEProtocolOPAQUE,
+		State:    r2ps.PAKEStateEvaluate,
+		Req:      base64.URLEncoding.EncodeToString([]byte("data")),
+	}
+	pakeJSON, _ := json.Marshal(pakeReq)
+	encData, _ := icrypto.EncryptJWE(pakeJSON, &key.PublicKey)
+
+	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
+		Ver:      r2ps.ProtocolVersion,
+		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:      time.Now().Unix(),
+		Enc:      r2ps.EncDevice,
+		Data:     encData,
+		ClientID: "c1",
+		Kid:      "k1",
+		Context:  "ctx",
+		Type:     r2ps.TypePINChange,
+	})
+
+	_, err := d.Process(context.Background(), body)
+	r2psErr := err.(*R2PSError)
+	if r2psErr.Code != r2ps.ErrIllegalRequestData {
+		t.Errorf("code = %q, want ILLEGAL_REQUEST_DATA", r2psErr.Code)
+	}
+}
+
+func TestPINChangeRequiresSession(t *testing.T) {
+	d, key, _ := setupDispatcher(t)
+
+	pakeReq := r2ps.PAKERequest{
+		Protocol: r2ps.PAKEProtocolOPAQUE,
+		State:    r2ps.PAKEStateEvaluate,
+		Req:      base64.URLEncoding.EncodeToString([]byte("data")),
+	}
+	pakeJSON, _ := json.Marshal(pakeReq)
+	encData, _ := icrypto.EncryptJWESymmetric(pakeJSON, icrypto.RandomBytes(32))
+
+	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
+		Ver:           r2ps.ProtocolVersion,
+		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:           time.Now().Unix(),
+		Enc:           r2ps.EncUser,
+		Data:          encData,
+		ClientID:      "c1",
+		Kid:           "k1",
+		Context:       "ctx",
+		Type:          r2ps.TypePINChange,
+		PakeSessionID: "nonexistent",
+	})
+
+	_, err := d.Process(context.Background(), body)
+	r2psErr := err.(*R2PSError)
+	if r2psErr.Code != r2ps.ErrUnauthorized {
+		t.Errorf("code = %q, want UNAUTHORIZED", r2psErr.Code)
+	}
+}
+
+func TestServiceSessionContextMismatch(t *testing.T) {
+	d, key, _ := setupDispatcher(t)
+
+	// Create a verified session with context "ctx-A"
+	sessionKey := icrypto.RandomBytes(32)
+	sess := &pake.Session{
+		ID:         "test-session",
+		ClientID:   "c1",
+		Kid:        "k1",
+		Context:    "ctx-A",
+		SessionKey: sessionKey,
+		ExpiresAt:  time.Now().Add(5 * time.Minute),
+		Verified:   true,
+	}
+	d.sessions.Create(sess)
+
+	svcReq, _ := json.Marshal(map[string]string{"curve": "P-256"})
+	encData, _ := icrypto.EncryptJWESymmetric(svcReq, sessionKey[:32])
+
+	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
+		Ver:           r2ps.ProtocolVersion,
+		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:           time.Now().Unix(),
+		Enc:           r2ps.EncUser,
+		Data:          encData,
+		ClientID:      "c1",
+		Kid:           "k1",
+		Context:       "ctx-B", // different from session context
+		Type:          r2ps.TypeHSMECKeygen,
+		PakeSessionID: "test-session",
+	})
+
+	_, err := d.Process(context.Background(), body)
+	r2psErr := err.(*R2PSError)
+	if r2psErr.Code != r2ps.ErrAccessDenied {
+		t.Errorf("code = %q, want ACCESS_DENIED", r2psErr.Code)
 	}
 }

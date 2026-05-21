@@ -22,6 +22,12 @@ type RecordStore interface {
 	PutRecord(clientID, kid string, record *opaque.ClientRecord) error
 }
 
+// ClientKeyStore resolves a client's public key by kid.
+// If not configured, the dispatcher falls back to using the server key for JWS verification.
+type ClientKeyStore interface {
+	GetClientKey(kid string) (*ecdsa.PublicKey, error)
+}
+
 // InMemoryRecordStore is a test/dev record store.
 type InMemoryRecordStore struct {
 	records map[string]*opaque.ClientRecord
@@ -51,8 +57,10 @@ type Dispatcher struct {
 	sessions   *pake.SessionStore
 	counter    *pake.AttemptCounter
 	records    RecordStore
+	clientKeys ClientKeyStore
 	handlers   map[string]Handler
 	sessionTTL time.Duration
+	iatMaxSkew time.Duration
 }
 
 // DispatcherConfig holds initialization parameters.
@@ -60,10 +68,12 @@ type DispatcherConfig struct {
 	ServerKey   *ecdsa.PrivateKey
 	OPAQUEKey   *pake.ServerKeyMaterial
 	Records     RecordStore
+	ClientKeys  ClientKeyStore // optional; if nil, server key is used for JWS verification
 	Handlers    []Handler
 	MaxAttempts int
 	LockoutDur  time.Duration
 	SessionTTL  time.Duration
+	IatMaxSkew  time.Duration  // max clock skew for iat validation; 0 = 5 minutes
 }
 
 // NewDispatcher creates a fully wired dispatcher.
@@ -91,14 +101,21 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		hMap[h.Type()] = h
 	}
 
+	iatMaxSkew := cfg.IatMaxSkew
+	if iatMaxSkew == 0 {
+		iatMaxSkew = 5 * time.Minute
+	}
+
 	return &Dispatcher{
 		serverKey:  cfg.ServerKey,
 		opaque:     opaqueServer,
 		sessions:   pake.NewSessionStore(),
 		counter:    pake.NewAttemptCounter(maxAttempts, lockout),
 		records:    cfg.Records,
+		clientKeys: cfg.ClientKeys,
 		handlers:   hMap,
 		sessionTTL: sessionTTL,
+		iatMaxSkew: iatMaxSkew,
 	}, nil
 }
 
@@ -120,9 +137,21 @@ func (d *Dispatcher) StartSessionCleanup(interval time.Duration) {
 // Process handles a raw R2PS POST body (JWS compact serialization).
 // Returns a JWS compact serialization response or an error response.
 func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
-	// Parse JWS — for now use server's own key for verification (self-signed dev mode)
-	// In production, look up client's key by kid from the JWS header.
-	payload, err := icrypto.VerifyJWS(string(body), &d.serverKey.PublicKey)
+	// Look up the verification key using the JWS kid header.
+	pubKey := &d.serverKey.PublicKey // default: server key (dev/test)
+	if d.clientKeys != nil {
+		headers, err := icrypto.PeekJWSHeaders(string(body))
+		if err != nil {
+			return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid JWS header"}
+		}
+		if kid, ok := headers["kid"].(string); ok && kid != "" {
+			if pk, err := d.clientKeys.GetClientKey(kid); err == nil {
+				pubKey = pk
+			}
+		}
+	}
+
+	payload, err := icrypto.VerifyJWS(string(body), pubKey)
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid JWS"}
 	}
@@ -142,6 +171,13 @@ func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "nonce must be at least 8 bytes"}
 	}
 
+	// Validate iat (issued-at) is within acceptable clock skew
+	now := time.Now()
+	iat := time.Unix(req.Iat, 0)
+	if now.Sub(iat).Abs() > d.iatMaxSkew {
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "iat outside acceptable range"}
+	}
+
 	// Route by type
 	switch req.Type {
 	case r2ps.TypePINRegistration:
@@ -149,7 +185,7 @@ func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
 	case r2ps.TypeAuthenticate:
 		return d.handlePAKE(ctx, &req)
 	case r2ps.TypePINChange:
-		return d.handlePAKE(ctx, &req)
+		return d.handlePINChange(ctx, &req)
 	default:
 		return d.handleService(ctx, &req)
 	}
@@ -195,7 +231,7 @@ func (d *Dispatcher) handlePAKE(ctx context.Context, req *r2ps.ServiceRequest) (
 }
 
 func (d *Dispatcher) regEvaluate(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.PAKERequest, reqData []byte) ([]byte, error) {
-	credID := []byte(req.ClientID + "|" + req.Kid)
+	credID := []byte(req.Context + "|" + req.ClientID + "|" + req.Kid)
 	respBytes, err := d.opaque.RegistrationResponse(reqData, credID)
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "registration evaluate failed"}
@@ -213,7 +249,7 @@ func (d *Dispatcher) regFinalize(_ context.Context, req *r2ps.ServiceRequest, _ 
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid registration record"}
 	}
 
-	credID := []byte(req.ClientID + "|" + req.Kid)
+	credID := []byte(req.Context + "|" + req.ClientID + "|" + req.Kid)
 	clientRecord := &opaque.ClientRecord{
 		RegistrationRecord:   record,
 		CredentialIdentifier: credID,
@@ -239,7 +275,7 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, p
 	record, err := d.records.GetRecord(req.ClientID, req.Kid)
 	if err != nil {
 		// Unknown client: use fake record to prevent client enumeration
-		record = d.opaque.FakeRecord([]byte(req.ClientID + "|" + req.Kid))
+		record = d.opaque.FakeRecord([]byte(req.Context + "|" + req.ClientID + "|" + req.Kid))
 	}
 
 	ke2Bytes, clientMAC, sessionSecret, err := d.opaque.AuthEvaluate(reqData, record)
@@ -310,6 +346,29 @@ func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, p
 	return d.encryptAndSign(req, &pakeResp)
 }
 
+// handlePINChange requires an authenticated session before re-registering a PIN.
+func (d *Dispatcher) handlePINChange(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
+	// pin_change requires enc=user — the spec mandates user-authenticated encryption
+	if req.Enc != r2ps.EncUser {
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "pin_change requires enc=user"}
+	}
+
+	sess := d.sessions.Get(req.PakeSessionID)
+	if sess == nil {
+		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not found or expired"}
+	}
+	if !sess.Verified {
+		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not verified"}
+	}
+
+	// Validate session context matches request context
+	if sess.Context != req.Context {
+		return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: "session context mismatch"}
+	}
+
+	return d.handlePAKE(ctx, req)
+}
+
 func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
 	handler, ok := d.handlers[req.Type]
 	if !ok {
@@ -327,6 +386,11 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 	}
 	if !sess.Verified {
 		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not verified"}
+	}
+
+	// Validate session context matches request context
+	if sess.Context != req.Context {
+		return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: "session context mismatch"}
 	}
 
 	// Decrypt service data using session key
@@ -389,8 +453,15 @@ func (d *Dispatcher) encryptAndSign(req *r2ps.ServiceRequest, pakeResp *r2ps.PAK
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal failed"}
 	}
 
-	// Encrypt data with device key (ephemeral ECDH)
-	encData, err := icrypto.EncryptJWE(respJSON, &d.serverKey.PublicKey)
+	// Encrypt data to client's context key (device-mode ECDH).
+	// Per spec: server encrypts to client's public context key.
+	recipientKey := &d.serverKey.PublicKey // fallback for dev/test
+	if d.clientKeys != nil {
+		if pk, err := d.clientKeys.GetClientKey(req.Kid); err == nil {
+			recipientKey = pk
+		}
+	}
+	encData, err := icrypto.EncryptJWE(respJSON, recipientKey)
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "encrypt failed"}
 	}
