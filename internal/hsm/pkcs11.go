@@ -375,9 +375,10 @@ func (b *PKCS11Backend) ListKeys(ctx context.Context, curves []string) ([]KeyInf
 
 			kid := string(attrs[0].Value)
 			keys = append(keys, KeyInfo{
-				Kid:    kid,
-				Curve:  curveName,
-				PubKey: pubBytes,
+				Kid:          kid,
+				Curve:        curveName,
+				CreationTime: 0, // PKCS#11 does not track creation time
+				PubKey:       pubBytes,
 			})
 		}
 	}

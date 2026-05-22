@@ -2,10 +2,11 @@ package hsm
 
 import "context"
 
-// KeyInfo describes an HSM-managed key.
+// KeyInfo describes an HSM-managed key (internal representation).
 type KeyInfo struct {
-	Kid   string `json:"kid"`
-	Curve string `json:"curve"`
+	Kid          string `json:"kid"`
+	Curve        string `json:"curve"`
+	CreationTime int64  `json:"creation_time"`
 	// PubKey is the compressed EC public key bytes.
 	PubKey []byte `json:"pub_key"`
 }

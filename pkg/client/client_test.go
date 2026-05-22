@@ -47,7 +47,7 @@ func (m *inMemHSMBackend) ECDH(_ context.Context, _ string, _ []byte) ([]byte, e
 func (m *inMemHSMBackend) ListKeys(_ context.Context, _ []string) ([]hsm.KeyInfo, error) {
 	var keys []hsm.KeyInfo
 	for kid, k := range m.keys {
-		keys = append(keys, hsm.KeyInfo{Kid: kid, Curve: k.curve, PubKey: k.pubKey})
+		keys = append(keys, hsm.KeyInfo{Kid: kid, Curve: k.curve, CreationTime: 0, PubKey: k.pubKey})
 	}
 	return keys, nil
 }
@@ -149,8 +149,8 @@ func TestCallServiceAfterAuth(t *testing.T) {
 	if err := json.Unmarshal(resp, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if result["kid"] == "" {
-		t.Error("expected kid in response")
+	if result["created_key"] == "" {
+		t.Error("expected created_key in response")
 	}
 }
 

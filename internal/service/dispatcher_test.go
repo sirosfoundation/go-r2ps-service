@@ -70,7 +70,7 @@ func (m *mockBackend) ListKeys(_ context.Context, curves []string) ([]hsm.KeyInf
 				continue
 			}
 		}
-		keys = append(keys, hsm.KeyInfo{Kid: k.kid, Curve: k.curve, PubKey: k.pubKey})
+		keys = append(keys, hsm.KeyInfo{Kid: k.kid, Curve: k.curve, CreationTime: 0, PubKey: k.pubKey})
 	}
 	return keys, nil
 }
@@ -490,8 +490,8 @@ func TestFullProtocolFlow(t *testing.T) {
 	if err := json.Unmarshal(svcRespData, &keygenResp); err != nil {
 		t.Fatalf("unmarshal keygen resp: %v", err)
 	}
-	if keygenResp["kid"] == "" {
-		t.Error("expected kid in keygen response")
+	if keygenResp["created_key"] == "" {
+		t.Error("expected created_key in keygen response")
 	}
 }
 

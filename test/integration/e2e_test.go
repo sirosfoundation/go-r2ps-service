@@ -98,32 +98,44 @@ func TestE2ERegisterAuthenticateSign(t *testing.T) {
 	if err := json.Unmarshal(keygenResp, &keygen); err != nil {
 		t.Fatalf("unmarshal keygen response: %v", err)
 	}
-	if keygen.Kid == "" {
-		t.Fatal("keygen returned empty kid")
+	if keygen.CreatedKey == "" {
+		t.Fatal("keygen returned empty created_key")
 	}
+
+	// Step 3b: List keys to get the kid for signing
+	listReq, _ := json.Marshal(service.ListKeysRequest{Curve: []string{keygen.CreatedKey}})
+	listResp, err := c.CallService(r2ps.TypeHSMListKeys, listReq)
+	if err != nil {
+		t.Fatalf("CallService list_keys: %v", err)
+	}
+	var listKeys service.ListKeysResponse
+	if err := json.Unmarshal(listResp, &listKeys); err != nil {
+		t.Fatalf("unmarshal list_keys response: %v", err)
+	}
+	if len(listKeys.KeyInfo) == 0 {
+		t.Fatal("no keys returned")
+	}
+	kid := listKeys.KeyInfo[len(listKeys.KeyInfo)-1].Kid
 
 	// Step 4: Sign a hash
 	data := []byte("hello world")
 	hash := sha256.Sum256(data)
 
 	signReq, _ := json.Marshal(service.ECDSASignRequest{
-		Kid:  keygen.Kid,
-		Hash: encodeBase64(hash[:]),
+		Kid:     kid,
+		TbsHash: encodeBase64(hash[:]),
 	})
 	signResp, err := c.CallService(r2ps.TypeHSMECDSA, signReq)
 	if err != nil {
 		t.Fatalf("CallService sign: %v", err)
 	}
 
-	var sig service.ECDSASignResponse
-	if err := json.Unmarshal(signResp, &sig); err != nil {
-		t.Fatalf("unmarshal sign response: %v", err)
-	}
-	if sig.Signature == "" {
+	// Spec §3.2: response is raw DER signature bytes.
+	if len(signResp) == 0 {
 		t.Fatal("empty signature")
 	}
 
-	t.Logf("E2E success: registered, authenticated, generated key %s, signed hash", keygen.Kid)
+	t.Logf("E2E success: registered, authenticated, generated key (curve=%s), kid=%s, signed hash", keygen.CreatedKey, kid)
 }
 
 func TestE2EWrongPIN(t *testing.T) {

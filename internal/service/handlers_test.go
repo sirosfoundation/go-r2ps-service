@@ -19,8 +19,8 @@ func TestECDSAHandlerSuccess(t *testing.T) {
 
 	h := NewECDSAHandler(backend)
 	req, _ := json.Marshal(ECDSASignRequest{
-		Kid:  kid,
-		Hash: encodeBase64(make([]byte, 32)), // SHA-256 hash
+		Kid:     kid,
+		TbsHash: encodeBase64(make([]byte, 32)), // SHA-256 hash
 	})
 
 	resp, err := h.Handle(context.Background(), "client1", req)
@@ -28,11 +28,8 @@ func TestECDSAHandlerSuccess(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 
-	var signResp ECDSASignResponse
-	if err := json.Unmarshal(resp, &signResp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if signResp.Signature == "" {
+	// Spec §3.2: response is raw DER signature bytes.
+	if len(resp) == 0 {
 		t.Error("empty signature")
 	}
 }
@@ -48,8 +45,8 @@ func TestECDSAHandlerInvalidJSON(t *testing.T) {
 func TestECDSAHandlerInvalidKid(t *testing.T) {
 	h := NewECDSAHandler(newMockBackend())
 	req, _ := json.Marshal(ECDSASignRequest{
-		Kid:  "../../etc/passwd",
-		Hash: encodeBase64(make([]byte, 32)),
+		Kid:     "../../etc/passwd",
+		TbsHash: encodeBase64(make([]byte, 32)),
 	})
 	_, err := h.Handle(context.Background(), "c1", req)
 	if err == nil {
@@ -60,8 +57,8 @@ func TestECDSAHandlerInvalidKid(t *testing.T) {
 func TestECDSAHandlerInvalidHash(t *testing.T) {
 	h := NewECDSAHandler(newMockBackend())
 	req, _ := json.Marshal(ECDSASignRequest{
-		Kid:  "validkid",
-		Hash: encodeBase64(make([]byte, 16)), // wrong length
+		Kid:     "validkid",
+		TbsHash: encodeBase64(make([]byte, 16)), // wrong length
 	})
 	_, err := h.Handle(context.Background(), "c1", req)
 	if err == nil {
@@ -72,8 +69,8 @@ func TestECDSAHandlerInvalidHash(t *testing.T) {
 func TestECDSAHandlerBadBase64(t *testing.T) {
 	h := NewECDSAHandler(newMockBackend())
 	req, _ := json.Marshal(ECDSASignRequest{
-		Kid:  "validkid",
-		Hash: "not-valid-base64!!!",
+		Kid:     "validkid",
+		TbsHash: "not-valid-base64!!!",
 	})
 	_, err := h.Handle(context.Background(), "c1", req)
 	if err == nil {
@@ -103,8 +100,8 @@ func TestECKeygenHandlerSuccess(t *testing.T) {
 	if err := json.Unmarshal(resp, &keygenResp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if keygenResp.Kid == "" || keygenResp.PubKey == "" {
-		t.Error("empty kid or pub_key")
+	if keygenResp.CreatedKey == "" {
+		t.Error("empty created_key")
 	}
 }
 
@@ -137,8 +134,8 @@ func TestECDHHandlerSuccess(t *testing.T) {
 	}
 
 	req, _ := json.Marshal(ECDHRequest{
-		Kid:        kid,
-		PeerPubKey: encodeBase64(peerKey),
+		Kid:       kid,
+		PublicKey: encodeBase64(peerKey),
 	})
 
 	resp, err := h.Handle(context.Background(), "c1", req)
@@ -146,11 +143,8 @@ func TestECDHHandlerSuccess(t *testing.T) {
 		t.Fatalf("handle: %v", err)
 	}
 
-	var ecdhResp ECDHResponse
-	if err := json.Unmarshal(resp, &ecdhResp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if ecdhResp.SharedSecret == "" {
+	// Spec §4.2: response is raw shared secret bytes.
+	if len(resp) == 0 {
 		t.Error("empty shared secret")
 	}
 }
@@ -166,8 +160,8 @@ func TestECDHHandlerInvalidJSON(t *testing.T) {
 func TestECDHHandlerInvalidKid(t *testing.T) {
 	h := NewECDHHandler(newMockBackend())
 	req, _ := json.Marshal(ECDHRequest{
-		Kid:        "bad kid !@#",
-		PeerPubKey: encodeBase64(make([]byte, 33)),
+		Kid:       "bad kid !@#",
+		PublicKey: encodeBase64(make([]byte, 33)),
 	})
 	_, err := h.Handle(context.Background(), "c1", req)
 	if err == nil {
@@ -178,8 +172,8 @@ func TestECDHHandlerInvalidKid(t *testing.T) {
 func TestECDHHandlerInvalidPeerKeyLength(t *testing.T) {
 	h := NewECDHHandler(newMockBackend())
 	req, _ := json.Marshal(ECDHRequest{
-		Kid:        "validkid",
-		PeerPubKey: encodeBase64(make([]byte, 10)), // wrong length
+		Kid:       "validkid",
+		PublicKey: encodeBase64(make([]byte, 10)), // wrong length
 	})
 	_, err := h.Handle(context.Background(), "c1", req)
 	if err == nil {
@@ -190,8 +184,8 @@ func TestECDHHandlerInvalidPeerKeyLength(t *testing.T) {
 func TestECDHHandlerBadPeerKeyBase64(t *testing.T) {
 	h := NewECDHHandler(newMockBackend())
 	req, _ := json.Marshal(ECDHRequest{
-		Kid:        "validkid",
-		PeerPubKey: "!!!bad!!!",
+		Kid:       "validkid",
+		PublicKey: "!!!bad!!!",
 	})
 	_, err := h.Handle(context.Background(), "c1", req)
 	if err == nil {
@@ -225,8 +219,8 @@ func TestListKeysHandlerSuccess(t *testing.T) {
 	if err := json.Unmarshal(resp, &listResp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(listResp.Keys) != 2 {
-		t.Errorf("keys count = %d, want 2", len(listResp.Keys))
+	if len(listResp.KeyInfo) != 2 {
+		t.Errorf("keys count = %d, want 2", len(listResp.KeyInfo))
 	}
 }
 
@@ -236,7 +230,7 @@ func TestListKeysHandlerWithFilter(t *testing.T) {
 	backend.GenerateECKey(context.Background(), "P-384")
 
 	h := NewListKeysHandler(backend)
-	req, _ := json.Marshal(ListKeysRequest{Curves: []string{"P-256"}})
+	req, _ := json.Marshal(ListKeysRequest{Curve: []string{"P-256"}})
 
 	resp, err := h.Handle(context.Background(), "c1", req)
 	if err != nil {
@@ -245,8 +239,8 @@ func TestListKeysHandlerWithFilter(t *testing.T) {
 
 	var listResp ListKeysResponse
 	json.Unmarshal(resp, &listResp)
-	if len(listResp.Keys) != 1 {
-		t.Errorf("keys count = %d, want 1", len(listResp.Keys))
+	if len(listResp.KeyInfo) != 1 {
+		t.Errorf("keys count = %d, want 1", len(listResp.KeyInfo))
 	}
 }
 

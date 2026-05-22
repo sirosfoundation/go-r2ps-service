@@ -73,7 +73,7 @@ type DispatcherConfig struct {
 	MaxAttempts int
 	LockoutDur  time.Duration
 	SessionTTL  time.Duration
-	IatMaxSkew  time.Duration  // max clock skew for iat validation; 0 = 5 minutes
+	IatMaxSkew  time.Duration // max clock skew for iat validation; 0 = 5 minutes
 }
 
 // NewDispatcher creates a fully wired dispatcher.

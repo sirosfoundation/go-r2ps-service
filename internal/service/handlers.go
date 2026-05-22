@@ -22,14 +22,13 @@ func validateKid(kid string) error {
 
 // --- HSM ECDSA Sign Handler ---
 
+// ECDSASignRequest matches spec §3.2: { "kid": "...", "tbs_hash": "..." }
 type ECDSASignRequest struct {
-	Kid  string `json:"kid"`
-	Hash string `json:"hash"` // base64url-encoded hash to sign
+	Kid     string `json:"kid"`
+	TbsHash string `json:"tbs_hash"` // base64-encoded hash to sign
 }
 
-type ECDSASignResponse struct {
-	Signature string `json:"signature"` // base64url-encoded ASN.1 DER signature
-}
+// ECDSASignResponse: spec §3.2 says response is raw DER signature bytes (not JSON).
 
 type ECDSAHandler struct {
 	backend hsm.Backend
@@ -48,9 +47,9 @@ func (h *ECDSAHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]
 		return nil, fmt.Errorf("parse sign request: %w", err)
 	}
 
-	hashBytes, err := decodeBase64(req.Hash)
+	hashBytes, err := decodeBase64(req.TbsHash)
 	if err != nil {
-		return nil, fmt.Errorf("decode hash: %w", err)
+		return nil, fmt.Errorf("decode tbs_hash: %w", err)
 	}
 
 	if err := validateKid(req.Kid); err != nil {
@@ -70,10 +69,8 @@ func (h *ECDSAHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]
 	}
 	HSMOperationsTotal.WithLabelValues("sign", "success").Inc()
 
-	resp := ECDSASignResponse{
-		Signature: encodeBase64(sig),
-	}
-	return json.Marshal(resp)
+	// Spec §3.2: response payload is raw DER signature bytes.
+	return sig, nil
 }
 
 // --- HSM EC Keygen Handler ---
@@ -82,9 +79,9 @@ type ECKeygenRequest struct {
 	Curve string `json:"curve"`
 }
 
+// ECKeygenResponse matches spec §1.2: { "created_key": "P-256" }
 type ECKeygenResponse struct {
-	Kid    string `json:"kid"`
-	PubKey string `json:"pub_key"` // base64url-encoded compressed public key
+	CreatedKey string `json:"created_key"` // curve name confirming key creation
 }
 
 type ECKeygenHandler struct {
@@ -111,24 +108,25 @@ func (h *ECKeygenHandler) Handle(ctx context.Context, _ string, reqData []byte) 
 		return nil, fmt.Errorf("keygen: %w", err)
 	}
 	HSMOperationsTotal.WithLabelValues("keygen", "success").Inc()
+	_ = kid    // kid available via list_keys
+	_ = pubKey // public key available via list_keys
 
+	// Spec §1.2: response confirms the curve for which a key was created.
 	resp := ECKeygenResponse{
-		Kid:    kid,
-		PubKey: encodeBase64(pubKey),
+		CreatedKey: req.Curve,
 	}
 	return json.Marshal(resp)
 }
 
 // --- HSM ECDH Handler ---
 
+// ECDHRequest matches spec §4.2: { "kid": "...", "public_key": "..." }
 type ECDHRequest struct {
-	Kid        string `json:"kid"`
-	PeerPubKey string `json:"peer_pub_key"` // base64url-encoded peer public key
+	Kid       string `json:"kid"`
+	PublicKey string `json:"public_key"` // SPKI DER-encoded peer public key (base64)
 }
 
-type ECDHResponse struct {
-	SharedSecret string `json:"shared_secret"` // base64url-encoded shared secret
-}
+// ECDHResponse: spec §4.2 says response is raw shared secret bytes (not JSON).
 
 type ECDHHandler struct {
 	backend hsm.Backend
@@ -147,9 +145,9 @@ func (h *ECDHHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]b
 		return nil, fmt.Errorf("parse ECDH request: %w", err)
 	}
 
-	peerKey, err := decodeBase64(req.PeerPubKey)
+	peerKey, err := decodeBase64(req.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("decode peer key: %w", err)
+		return nil, fmt.Errorf("decode public_key: %w", err)
 	}
 
 	if err := validateKid(req.Kid); err != nil {
@@ -169,20 +167,28 @@ func (h *ECDHHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]b
 	}
 	HSMOperationsTotal.WithLabelValues("ecdh", "success").Inc()
 
-	resp := ECDHResponse{
-		SharedSecret: encodeBase64(secret),
-	}
-	return json.Marshal(resp)
+	// Spec §4.2: response payload is raw shared secret bytes.
+	return secret, nil
 }
 
 // --- HSM List Keys Handler ---
 
+// ListKeysRequest matches spec §2.2: { "curve": ["P-256"] }
 type ListKeysRequest struct {
-	Curves []string `json:"curves,omitempty"`
+	Curve []string `json:"curve"`
 }
 
+// WireKeyInfo is the spec §2.2 key_info entry.
+type WireKeyInfo struct {
+	Kid          string `json:"kid"`
+	CurveName    string `json:"curve_name"`
+	CreationTime int64  `json:"creation_time"`
+	PublicKey    string `json:"public_key"` // SPKI DER base64
+}
+
+// ListKeysResponse matches spec §2.2: { "key_info": [...] }
 type ListKeysResponse struct {
-	Keys []hsm.KeyInfo `json:"keys"`
+	KeyInfo []WireKeyInfo `json:"key_info"`
 }
 
 type ListKeysHandler struct {
@@ -202,7 +208,7 @@ func (h *ListKeysHandler) Handle(ctx context.Context, _ string, reqData []byte) 
 		return nil, fmt.Errorf("parse list keys request: %w", err)
 	}
 
-	keys, err := h.backend.ListKeys(ctx, req.Curves)
+	keys, err := h.backend.ListKeys(ctx, req.Curve)
 	HSMOperationDuration.WithLabelValues("list_keys").Observe(time.Since(start).Seconds())
 	if err != nil {
 		HSMOperationsTotal.WithLabelValues("list_keys", "error").Inc()
@@ -210,6 +216,17 @@ func (h *ListKeysHandler) Handle(ctx context.Context, _ string, reqData []byte) 
 	}
 	HSMOperationsTotal.WithLabelValues("list_keys", "success").Inc()
 
-	resp := ListKeysResponse{Keys: keys}
+	// Convert internal KeyInfo to spec-compliant wire format.
+	wireKeys := make([]WireKeyInfo, len(keys))
+	for i, k := range keys {
+		wireKeys[i] = WireKeyInfo{
+			Kid:          k.Kid,
+			CurveName:    k.Curve,
+			CreationTime: k.CreationTime,
+			PublicKey:    encodeBase64(k.PubKey),
+		}
+	}
+
+	resp := ListKeysResponse{KeyInfo: wireKeys}
 	return json.Marshal(resp)
 }
