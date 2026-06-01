@@ -14,10 +14,23 @@
 
 R2PS (Remote PAKE-Protected Services) server implementation in Go.
 
-Implements the [DIGG R2PS specification](https://github.com/diggsweden/wallet-r2ps-specification)
-for secure remote HSM key operations with OPAQUE (RFC 9807) authentication and
-end-to-end JWE encryption. All cryptographic key operations are performed via
-PKCS#11 (SoftHSM2 for development, hardware HSM for production).
+Implements the R2PS protocol for secure remote HSM key operations with OPAQUE
+(RFC 9807) authentication and end-to-end JWE encryption. All cryptographic key
+operations are performed via PKCS#11 (SoftHSM2 for development, hardware HSM
+for production).
+
+## Specification
+
+The authoritative R2PS protocol specifications are maintained in
+[docs/specs/](docs/specs/):
+
+| Document | Description |
+|----------|-------------|
+| [r2ps.md](docs/specs/r2ps.md) | Base protocol — E2EE transport, 1FA/2FA modes, JWE/JWS structure |
+| [r2ps-service-types.md](docs/specs/r2ps-service-types.md) | Service types, message structure, 2FA mechanisms |
+| [r2ps-service-types-register.md](docs/specs/r2ps-service-types-register.md) | Registry of all service types |
+| [r2ps-service-types-eudiw.md](docs/specs/r2ps-service-types-eudiw.md) | EUDIW profile (eudiw_wka_etsi, eudiw_wia_etsi) |
+| [r2ps-appendix-a.md](docs/specs/r2ps-appendix-a.md) | Service type creation framework/template |
 
 ## Package Structure
 
@@ -67,7 +80,8 @@ docker compose up
 
 ## Architecture
 
-See [docs/adr/](docs/adr/) for architecture decision records.
+See [docs/adr/](docs/adr/) for architecture decision records and
+[docs/specs/](docs/specs/) for the authoritative protocol specifications.
 
 ## Development
 

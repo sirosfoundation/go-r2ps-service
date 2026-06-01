@@ -17,7 +17,6 @@ import (
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
 
-// dispatcherTransport implements client.Transport by calling the dispatcher directly.
 type dispatcherTransport struct {
 	dispatcher *service.Dispatcher
 }
@@ -29,19 +28,16 @@ func (t *dispatcherTransport) Send(body []byte) ([]byte, error) {
 func setupE2E(t *testing.T) (*service.Dispatcher, *client.Client) {
 	t.Helper()
 
-	// Server key (shared for JWS signing in this test — client signs with same key)
 	serverKey, err := icrypto.GenerateECKey(elliptic.P256())
 	if err != nil {
 		t.Fatalf("generate server key: %v", err)
 	}
 
-	// OPAQUE key material
 	opaqueKey, err := pake.GenerateServerKeyMaterial()
 	if err != nil {
 		t.Fatalf("generate OPAQUE key: %v", err)
 	}
 
-	// HSM backend via PKCS#11 (SoftHSM2)
 	hsmBackend, hsmCleanup := hsm.NewTestBackend(t)
 	t.Cleanup(hsmCleanup)
 
@@ -63,7 +59,7 @@ func setupE2E(t *testing.T) (*service.Dispatcher, *client.Client) {
 	}
 
 	transport := &dispatcherTransport{dispatcher: dispatcher}
-	c := client.NewClient("test-client", "key-1", "signing", serverKey, &serverKey.PublicKey, transport)
+	c := client.NewClient("test-client", "signing", serverKey, &serverKey.PublicKey, transport)
 
 	return dispatcher, c
 }
@@ -73,13 +69,11 @@ func TestE2ERegisterAuthenticateSign(t *testing.T) {
 
 	pin := []byte("123456")
 
-	// Step 1: Register
 	if err := c.Register(pin); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	// Step 2: Authenticate
-	if err := c.Authenticate(pin, "signHash"); err != nil {
+	if err := c.Authenticate(pin); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 
@@ -87,9 +81,7 @@ func TestE2ERegisterAuthenticateSign(t *testing.T) {
 		t.Fatal("no session ID after authentication")
 	}
 
-	// Step 3: Generate a key via HSM
-	keygenReq, _ := json.Marshal(service.ECKeygenRequest{Curve: "P-256"})
-	keygenResp, err := c.CallService(r2ps.TypeHSMECKeygen, keygenReq)
+	keygenResp, err := c.CallService(r2ps.TypeP256Generate, json.RawMessage(`{"curve":"P-256"}`))
 	if err != nil {
 		t.Fatalf("CallService keygen: %v", err)
 	}
@@ -102,9 +94,7 @@ func TestE2ERegisterAuthenticateSign(t *testing.T) {
 		t.Fatal("keygen returned empty created_key")
 	}
 
-	// Step 3b: List keys to get the kid for signing
-	listReq, _ := json.Marshal(service.ListKeysRequest{Curve: []string{keygen.CreatedKey}})
-	listResp, err := c.CallService(r2ps.TypeHSMListKeys, listReq)
+	listResp, err := c.CallService(r2ps.TypeHSMListKeys, json.RawMessage(`{"curve":["P-256"]}`))
 	if err != nil {
 		t.Fatalf("CallService list_keys: %v", err)
 	}
@@ -117,7 +107,6 @@ func TestE2ERegisterAuthenticateSign(t *testing.T) {
 	}
 	kid := listKeys.KeyInfo[len(listKeys.KeyInfo)-1].Kid
 
-	// Step 4: Sign a hash
 	data := []byte("hello world")
 	hash := sha256.Sum256(data)
 
@@ -125,12 +114,11 @@ func TestE2ERegisterAuthenticateSign(t *testing.T) {
 		Kid:     kid,
 		TbsHash: encodeBase64(hash[:]),
 	})
-	signResp, err := c.CallService(r2ps.TypeHSMECDSA, signReq)
+	signResp, err := c.CallService(r2ps.TypeSignECDSA, json.RawMessage(signReq))
 	if err != nil {
 		t.Fatalf("CallService sign: %v", err)
 	}
 
-	// Spec §3.2: response is raw DER signature bytes.
 	if len(signResp) == 0 {
 		t.Fatal("empty signature")
 	}
@@ -141,13 +129,11 @@ func TestE2ERegisterAuthenticateSign(t *testing.T) {
 func TestE2EWrongPIN(t *testing.T) {
 	_, c := setupE2E(t)
 
-	// Register with correct PIN
 	if err := c.Register([]byte("correct-pin")); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	// Authenticate with wrong PIN — should fail
-	err := c.Authenticate([]byte("wrong-pin"), "signHash")
+	err := c.Authenticate([]byte("wrong-pin"))
 	if err == nil {
 		t.Fatal("expected authentication to fail with wrong PIN")
 	}
@@ -157,9 +143,7 @@ func TestE2EWrongPIN(t *testing.T) {
 func TestE2EServiceWithoutAuth(t *testing.T) {
 	_, c := setupE2E(t)
 
-	// Try to call service without authenticating
-	keygenReq, _ := json.Marshal(service.ECKeygenRequest{Curve: "P-256"})
-	_, err := c.CallService(r2ps.TypeHSMECKeygen, keygenReq)
+	_, err := c.CallService(r2ps.TypeP256Generate, json.RawMessage(`{"curve":"P-256"}`))
 	if err == nil {
 		t.Fatal("expected error calling service without authentication")
 	}

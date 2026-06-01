@@ -8,7 +8,7 @@ import (
 
 func TestECDSAHandlerType(t *testing.T) {
 	h := NewECDSAHandler(newMockBackend())
-	if h.Type() != "hsm_ecdsa" {
+	if h.Type() != "sign_ecdsa" {
 		t.Errorf("type = %q", h.Type())
 	}
 }
@@ -82,7 +82,7 @@ func TestECDSAHandlerBadBase64(t *testing.T) {
 
 func TestECKeygenHandlerType(t *testing.T) {
 	h := NewECKeygenHandler(newMockBackend())
-	if h.Type() != "hsm_ec_keygen" {
+	if h.Type() != "p256_generate" {
 		t.Errorf("type = %q", h.Type())
 	}
 }
@@ -117,7 +117,7 @@ func TestECKeygenHandlerInvalidJSON(t *testing.T) {
 
 func TestECDHHandlerType(t *testing.T) {
 	h := NewECDHHandler(newMockBackend())
-	if h.Type() != "hsm_ecdh" {
+	if h.Type() != "agree_ecdh" {
 		t.Errorf("type = %q", h.Type())
 	}
 }

@@ -10,12 +10,10 @@ func TestServiceRequestMarshal(t *testing.T) {
 		Ver:      ProtocolVersion,
 		Nonce:    "abc123",
 		Iat:      1700000000,
-		Enc:      EncDevice,
-		Data:     "ZW5jcnlwdGVk",
+		Data:     json.RawMessage(`{"kid":"key1","tbs_hash":"YUHJYg=="}`),
 		ClientID: "https://example.com/wallet/1",
-		Kid:      "key1",
 		Context:  "hsm",
-		Type:     TypeAuthenticate,
+		Type:     Type2FAAuthenticate,
 	}
 
 	data, err := json.Marshal(req)
@@ -37,23 +35,21 @@ func TestServiceRequestMarshal(t *testing.T) {
 	if got.Type != req.Type {
 		t.Errorf("type: got %q, want %q", got.Type, req.Type)
 	}
-	if got.PakeSessionID != "" {
-		t.Errorf("pake_session_id should be omitted, got %q", got.PakeSessionID)
+	if got.TFASessionID != "" {
+		t.Errorf("2fa_session_id should be omitted, got %q", got.TFASessionID)
 	}
 }
 
-func TestServiceRequestPakeSessionID(t *testing.T) {
+func TestServiceRequestTFASessionID(t *testing.T) {
 	req := ServiceRequest{
-		Ver:           ProtocolVersion,
-		Nonce:         "abc123",
-		Iat:           1700000000,
-		Enc:           EncDevice,
-		Data:          "ZW5jcnlwdGVk",
-		ClientID:      "https://example.com/wallet/1",
-		Kid:           "key1",
-		Context:       "hsm",
-		Type:          TypeAuthenticate,
-		PakeSessionID: "session-1",
+		Ver:          ProtocolVersion,
+		Nonce:        "abc123",
+		Iat:          1700000000,
+		Data:         json.RawMessage(`{"kid":"key1"}`),
+		ClientID:     "https://example.com/wallet/1",
+		Context:      "hsm",
+		Type:         TypeSignECDSA,
+		TFASessionID: "session-1",
 	}
 
 	data, err := json.Marshal(req)
@@ -66,8 +62,8 @@ func TestServiceRequestPakeSessionID(t *testing.T) {
 		t.Fatalf("unmarshal raw: %v", err)
 	}
 
-	if _, ok := raw["pake_session_id"]; !ok {
-		t.Error("pake_session_id should be present when set")
+	if _, ok := raw["2fa_session_id"]; !ok {
+		t.Error("2fa_session_id should be present when set")
 	}
 }
 
@@ -76,8 +72,7 @@ func TestServiceResponseMarshal(t *testing.T) {
 		Ver:   ProtocolVersion,
 		Nonce: "abc123",
 		Iat:   1700000000,
-		Enc:   EncUser,
-		Data:  "ZW5jcnlwdGVk",
+		Data:  json.RawMessage(`{"signature":"MEQCIG..."}`),
 	}
 
 	data, err := json.Marshal(resp)
@@ -90,16 +85,16 @@ func TestServiceResponseMarshal(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if got.Enc != EncUser {
-		t.Errorf("enc: got %q, want %q", got.Enc, EncUser)
+	if got.Ver != ProtocolVersion {
+		t.Errorf("ver: got %q, want %q", got.Ver, ProtocolVersion)
 	}
 }
 
-func TestPAKERequestMarshal(t *testing.T) {
-	req := PAKERequest{
-		Protocol: PAKEProtocolOPAQUE,
-		State:    PAKEStateEvaluate,
-		Req:      "b2xkX3JlcQ==",
+func TestTFARequestDataMarshal(t *testing.T) {
+	req := TFARequestData{
+		TFAMode: TFAModeOPAQUE,
+		State:   StateEvaluate,
+		Request: "b2xkX3JlcQ==",
 	}
 
 	data, err := json.Marshal(req)
@@ -115,15 +110,12 @@ func TestPAKERequestMarshal(t *testing.T) {
 	if _, ok := raw["authorization"]; ok {
 		t.Error("authorization should be omitted when empty")
 	}
-	if _, ok := raw["task"]; ok {
-		t.Error("task should be omitted when empty")
-	}
 }
 
 func TestErrorResponseMarshal(t *testing.T) {
 	resp := ErrorResponse{
 		ErrorCode:    ErrAccessDenied,
-		ErrorMessage: "The service type 'hsm_ecdsa' under context 'test' is not supported",
+		ErrorMessage: "The service type 'sign_ecdsa' under context 'test' is not supported",
 	}
 
 	data, err := json.Marshal(resp)

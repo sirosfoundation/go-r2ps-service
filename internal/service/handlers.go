@@ -38,7 +38,7 @@ func NewECDSAHandler(backend hsm.Backend) *ECDSAHandler {
 	return &ECDSAHandler{backend: backend}
 }
 
-func (h *ECDSAHandler) Type() string { return r2ps.TypeHSMECDSA }
+func (h *ECDSAHandler) Type() string { return r2ps.TypeSignECDSA }
 
 func (h *ECDSAHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
 	start := time.Now()
@@ -92,7 +92,7 @@ func NewECKeygenHandler(backend hsm.Backend) *ECKeygenHandler {
 	return &ECKeygenHandler{backend: backend}
 }
 
-func (h *ECKeygenHandler) Type() string { return r2ps.TypeHSMECKeygen }
+func (h *ECKeygenHandler) Type() string { return r2ps.TypeP256Generate }
 
 func (h *ECKeygenHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
 	start := time.Now()
@@ -136,7 +136,7 @@ func NewECDHHandler(backend hsm.Backend) *ECDHHandler {
 	return &ECDHHandler{backend: backend}
 }
 
-func (h *ECDHHandler) Type() string { return r2ps.TypeHSMECDH }
+func (h *ECDHHandler) Type() string { return r2ps.TypeAgreeECDH }
 
 func (h *ECDHHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
 	start := time.Now()

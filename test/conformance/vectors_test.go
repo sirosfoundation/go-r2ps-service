@@ -15,6 +15,26 @@ import (
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
 
+// vectorFiles returns the list of vector files to validate.
+func vectorFiles(t *testing.T) []string {
+	t.Helper()
+	base := filepath.Join("..", "..", "testdata")
+	var files []string
+	goPath := filepath.Join(base, "vectors_go.json")
+	if _, err := os.Stat(goPath); err == nil {
+		files = append(files, goPath)
+	} else {
+		t.Fatalf("vectors_go.json not found — run TestGenerateGoVectors first")
+	}
+	rustPath := filepath.Join(base, "vectors_rust.json")
+	if _, err := os.Stat(rustPath); err == nil {
+		files = append(files, rustPath)
+	} else {
+		t.Logf("vectors_rust.json not found — skipping Rust cross-validation")
+	}
+	return files
+}
+
 // --- Shared test vector format (consumed by both Go and Rust) ---
 
 // TestVectors is the top-level structure for cross-implementation conformance.
@@ -28,6 +48,7 @@ type TestVectors struct {
 	Protocol  ProtocolVectors `json:"protocol_types"`
 	HSM       HSMVectors      `json:"hsm_service_types"`
 	EUDIW     EUDIWVectors    `json:"eudiw_service_types,omitempty"`
+	HKDF      HKDFVectors     `json:"hkdf_vectors,omitempty"`
 }
 
 type Keys struct {
@@ -51,54 +72,49 @@ type JWEVectors struct {
 type ProtocolVectors struct {
 	ServiceRequestJSON  string `json:"service_request"`
 	ServiceResponseJSON string `json:"service_response"`
-	PAKERequestJSON     string `json:"pake_request"`
-	PAKEResponseJSON    string `json:"pake_response"`
+	TFARequestJSON      string `json:"tfa_request"`
+	TFAResponseJSON     string `json:"tfa_response"`
 	ErrorResponseJSON   string `json:"error_response"`
 
-	// Request/response pairs with nonce echo (rp2s-peter §3.1.3)
 	RequestResponsePairs []RequestResponsePair `json:"request_response_pairs,omitempty"`
+	AllErrorResponses    []NamedJSON           `json:"all_error_responses,omitempty"`
 
-	// All error codes (rp2s-peter §3.2)
-	AllErrorResponses []NamedJSON `json:"all_error_responses,omitempty"`
+	// 2FA registration flow (r2ps-service-types.md §5.1)
+	TFARegEvaluateReq  string `json:"tfa_reg_evaluate_req,omitempty"`
+	TFARegEvaluateResp string `json:"tfa_reg_evaluate_resp,omitempty"`
+	TFARegFinalizeReq  string `json:"tfa_reg_finalize_req,omitempty"`
+	TFARegFinalizeResp string `json:"tfa_reg_finalize_resp,omitempty"`
 
-	// PAKE flows (rp2s-peter §3.3)
-	PAKERegistrationEvaluateReq  string `json:"pake_reg_evaluate_req,omitempty"`
-	PAKERegistrationEvaluateResp string `json:"pake_reg_evaluate_resp,omitempty"`
-	PAKERegistrationFinalizeReq  string `json:"pake_reg_finalize_req,omitempty"`
-	PAKERegistrationFinalizeResp string `json:"pake_reg_finalize_resp,omitempty"`
-	PAKEAuthEvaluateReq          string `json:"pake_auth_evaluate_req,omitempty"`
-	PAKEAuthEvaluateResp         string `json:"pake_auth_evaluate_resp,omitempty"`
-	PAKEAuthFinalizeReq          string `json:"pake_auth_finalize_req,omitempty"`
-	PAKEAuthFinalizeResp         string `json:"pake_auth_finalize_resp,omitempty"`
-	PAKEPinChangeEvaluateReq     string `json:"pake_pinchange_evaluate_req,omitempty"`
-	PAKEPinChangeFinalizeReq     string `json:"pake_pinchange_finalize_req,omitempty"`
+	// 2FA auth flow (r2ps-service-types.md §5.2)
+	TFAAuthEvaluateReq  string `json:"tfa_auth_evaluate_req,omitempty"`
+	TFAAuthEvaluateResp string `json:"tfa_auth_evaluate_resp,omitempty"`
+	TFAAuthFinalizeReq  string `json:"tfa_auth_finalize_req,omitempty"`
+	TFAAuthFinalizeResp string `json:"tfa_auth_finalize_resp,omitempty"`
 
-	// Enc mode constraint vectors (rp2s-peter §3.3)
-	EncModeConstraints []EncModeConstraint `json:"enc_mode_constraints,omitempty"`
+	// 2FA change flow (r2ps-service-types.md §5.3)
+	TFAChangeEvaluateReq string `json:"tfa_change_evaluate_req,omitempty"`
+	TFAChangeFinalizeReq string `json:"tfa_change_finalize_req,omitempty"`
+
+	// Mode constraints
+	ModeConstraints []ModeConstraint `json:"mode_constraints,omitempty"`
 }
 
-// RequestResponsePair validates nonce echo and forbidden-field rules.
 type RequestResponsePair struct {
 	Name     string `json:"name"`
 	Request  string `json:"request"`
 	Response string `json:"response"`
 }
 
-// NamedJSON associates a name with a JSON string for tabular tests.
 type NamedJSON struct {
 	Name string `json:"name"`
 	JSON string `json:"json"`
 }
 
-// EncModeConstraint pairs a service type with its required enc mode.
-type EncModeConstraint struct {
-	Type        string `json:"type"`
-	RequiredEnc string `json:"required_enc"`
-	RequestJSON string `json:"request_json"`
+type ModeConstraint struct {
+	Type         string `json:"type"`
+	RequiredMode string `json:"required_mode"`
 }
 
-// HSMVectors uses the field names defined in the authoritative spec
-// (security/remote-hsm-apake-service-types.md).
 type HSMVectors struct {
 	ECKeygenRequestJSON  string `json:"ec_keygen_request"`
 	ECKeygenResponseJSON string `json:"ec_keygen_response"`
@@ -108,87 +124,64 @@ type HSMVectors struct {
 	ECDHResponseHex      string `json:"ecdh_response_hex"`
 	ListKeysRequestJSON  string `json:"list_keys_request"`
 	ListKeysResponseJSON string `json:"list_keys_response"`
-
-	// Multi-curve keygen vectors (§1)
-	KeygenP384RequestJSON  string `json:"keygen_p384_request,omitempty"`
-	KeygenP384ResponseJSON string `json:"keygen_p384_response,omitempty"`
-	KeygenP521RequestJSON  string `json:"keygen_p521_request,omitempty"`
-	KeygenP521ResponseJSON string `json:"keygen_p521_response,omitempty"`
-
-	// Empty-filter list_keys: curve=[] means list all (§2.2)
-	ListAllKeysRequestJSON  string `json:"list_all_keys_request,omitempty"`
-	ListAllKeysResponseJSON string `json:"list_all_keys_response,omitempty"`
 }
 
-// EUDIWVectors holds vectors for EUDIW service types
-// (security/r2ps-service-types-eudiw.md).
 type EUDIWVectors struct {
-	// WKA request/response (§1)
 	WKARequestJSON  string `json:"wka_request"`
 	WKAResponseJSON string `json:"wka_response"`
-	// WIA request/response (§2)
 	WIARequestJSON  string `json:"wia_request"`
 	WIAResponseJSON string `json:"wia_response"`
 }
 
-// --- EUDIW spec-compliant types ---
+type HKDFVectors struct {
+	SessionKeyHex string `json:"session_key_hex"`
+	SessionID     string `json:"session_id"`
+	KEKC2SHex     string `json:"kek_c2s_hex"`
+	KEKS2CHex     string `json:"kek_s2c_hex"`
+}
 
-// SpecWKARequest — EUDIW §1.1: { "keys_to_attest": [...], "ver": "d008" }
+// --- Spec-compliant types ---
+
 type SpecWKARequest struct {
 	KeysToAttest []string `json:"keys_to_attest"`
 	Ver          string   `json:"ver"`
 }
 
-// SpecWKAResponse — EUDIW §1.1: { "attestation": "<jwt>" }
 type SpecWKAResponse struct {
-	Attestation string `json:"attestation"`
+	WKA string `json:"wka"`
 }
 
-// SpecWIARequest — EUDIW §2.1: { "ver": "d008" }
 type SpecWIARequest struct {
-	Ver string `json:"ver"`
+	KeysToAttest []string `json:"keys_to_attest"`
+	Ver          string   `json:"ver"`
 }
 
-// SpecWIAResponse — EUDIW §2.1: { "attestation": "<jwt>" }
 type SpecWIAResponse struct {
-	Attestation string `json:"attestation"`
+	WIA string `json:"wia"`
 }
 
-// --- Spec-compliant HSM service type structures ---
-// These mirror the field names from security/remote-hsm-apake-service-types.md.
-
-// SpecECKeygenRequest — §1: { "curve": "P-256" }
 type SpecECKeygenRequest struct {
 	Curve string `json:"curve"`
 }
 
-// SpecECKeygenResponse — §1: { "created_key": "P-256" }
 type SpecECKeygenResponse struct {
 	CreatedKey string `json:"created_key"`
 }
 
-// SpecECDSARequest — §3: { "kid": "...", "tbs_hash": "..." }
 type SpecECDSARequest struct {
 	Kid     string `json:"kid"`
 	TbsHash string `json:"tbs_hash"`
 }
 
-// SpecECDSAResponse — §3: raw DER signature bytes (not JSON)
-
-// SpecECDHRequest — §4: { "kid": "...", "public_key": "..." }
 type SpecECDHRequest struct {
 	Kid       string `json:"kid"`
 	PublicKey string `json:"public_key"`
 }
 
-// SpecECDHResponse — §4: raw shared secret bytes (not JSON)
-
-// SpecListKeysRequest — §2: { "curve": ["P-256"] }
 type SpecListKeysRequest struct {
 	Curve []string `json:"curve"`
 }
 
-// SpecKeyInfo — §2
 type SpecKeyInfo struct {
 	Kid          string `json:"kid"`
 	CurveName    string `json:"curve_name"`
@@ -196,15 +189,12 @@ type SpecKeyInfo struct {
 	PublicKey    string `json:"public_key"`
 }
 
-// SpecListKeysResponse — §2: { "key_info": [...] }
 type SpecListKeysResponse struct {
 	KeyInfo []SpecKeyInfo `json:"key_info"`
 }
 
 // --- Vector generator ---
 
-// TestGenerateGoVectors generates test vectors from the Go implementation
-// and writes them to testdata/vectors_go.json.
 func TestGenerateGoVectors(t *testing.T) {
 	key, err := icrypto.GenerateECKey(elliptic.P256())
 	if err != nil {
@@ -225,41 +215,39 @@ func TestGenerateGoVectors(t *testing.T) {
 
 	symKey := icrypto.RandomBytes(32)
 
-	// --- JWS ---
+	// JWS — using new typ value
 	payload := []byte("hello interop")
 	kid := "conformance-kid-1"
-	typ := "r2ps-request+json"
+	typ := r2ps.TypRequest
 	jws, err := icrypto.SignJWS(payload, key, kid, typ)
 	if err != nil {
 		t.Fatalf("sign JWS: %v", err)
 	}
 
-	// --- JWE ECDH ---
+	// JWE ECDH
 	ecdhPlain := []byte("ecdh secret payload")
 	jweEcdh, err := icrypto.EncryptJWE(ecdhPlain, &key.PublicKey)
 	if err != nil {
 		t.Fatalf("encrypt JWE ECDH: %v", err)
 	}
 
-	// --- JWE Symmetric ---
+	// JWE Symmetric
 	symPlain := []byte("symmetric secret payload")
 	jweSym, err := icrypto.EncryptJWESymmetric(symPlain, symKey)
 	if err != nil {
 		t.Fatalf("encrypt JWE symmetric: %v", err)
 	}
 
-	// --- Protocol types ---
+	// Service request — new spec structure
 	svcReq := r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         "dGVzdG5vbmNl",
-		Iat:           1716400000,
-		Enc:           r2ps.EncDevice,
-		Data:          "eyJhbGciOiJFQ0RILUVTK0EyNTZLVyJ9...",
-		ClientID:      "test-client",
-		Kid:           "key-1",
-		Context:       "signing",
-		Type:          r2ps.TypeHSMECDSA,
-		PakeSessionID: "session-abc",
+		Ver:          r2ps.ProtocolVersion,
+		Nonce:        "dGVzdG5vbmNl",
+		Iat:          1716400000,
+		Data:         json.RawMessage(`{"kid":"key-0","tbs_hash":"YUHJYg=="}`),
+		ClientID:     "test-client",
+		Context:      "hsm",
+		Type:         r2ps.TypeSignECDSA,
+		TFASessionID: "session-abc",
 	}
 	svcReqJSON, _ := json.Marshal(svcReq)
 
@@ -267,26 +255,22 @@ func TestGenerateGoVectors(t *testing.T) {
 		Ver:   r2ps.ProtocolVersion,
 		Nonce: "cmVzcG5vbmNl",
 		Iat:   1716400001,
-		Enc:   r2ps.EncUser,
-		Data:  "eyJhbGciOiJkaXIifQ...",
+		Data:  json.RawMessage(`{"signature":"MEQCIG..."}`),
 	}
 	svcRespJSON, _ := json.Marshal(svcResp)
 
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Task:     "sign",
-		Req:      "b3BhcXVlLXJlcXVlc3Q",
+	// 2FA request/response data
+	tfaReq := r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateEvaluate,
+		Request: "b3BhcXVlLXJlcXVlc3Q",
 	}
-	pakeReqJSON, _ := json.Marshal(pakeReq)
+	tfaReqJSON, _ := json.Marshal(tfaReq)
 
-	pakeResp := r2ps.PAKEResponse{
-		PakeSessionID:         "sess-123",
-		Resp:                  "b3BhcXVlLXJlc3BvbnNl",
-		Task:                  "sign",
-		SessionExpirationTime: 1716403600,
+	tfaResp := r2ps.TFAResponseData{
+		Response: "b3BhcXVlLXJlc3BvbnNl",
 	}
-	pakeRespJSON, _ := json.Marshal(pakeResp)
+	tfaRespJSON, _ := json.Marshal(tfaResp)
 
 	errResp := r2ps.ErrorResponse{
 		ErrorCode:    r2ps.ErrUnauthorized,
@@ -294,31 +278,28 @@ func TestGenerateGoVectors(t *testing.T) {
 	}
 	errRespJSON, _ := json.Marshal(errResp)
 
-	// --- Request/response pairs with matching nonce (rp2s-peter §3.1.3) ---
+	// Request/response pair
 	sharedNonce := "Y29uZm9ybWFuY2Vub25jZQ"
 	pairReq := r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         sharedNonce,
-		Iat:           1716400000,
-		Enc:           r2ps.EncUser,
-		Data:          "eyJhbGciOiJkaXIifQ...",
-		ClientID:      "test-client",
-		Kid:           "key-1",
-		Context:       "hsm",
-		Type:          r2ps.TypeHSMECDSA,
-		PakeSessionID: "session-abc",
+		Ver:          r2ps.ProtocolVersion,
+		Nonce:        sharedNonce,
+		Iat:          1716400000,
+		Data:         json.RawMessage(`{"kid":"key-0","tbs_hash":"YUHJYg=="}`),
+		ClientID:     "test-client",
+		Context:      "hsm",
+		Type:         r2ps.TypeSignECDSA,
+		TFASessionID: "session-abc",
 	}
 	pairReqJSON, _ := json.Marshal(pairReq)
 	pairResp := r2ps.ServiceResponse{
 		Ver:   r2ps.ProtocolVersion,
-		Nonce: sharedNonce, // must echo
+		Nonce: sharedNonce,
 		Iat:   1716400001,
-		Enc:   r2ps.EncUser,
-		Data:  "eyJhbGciOiJkaXIifQ...",
+		Data:  json.RawMessage(`{"signature":"MEQCIG..."}`),
 	}
 	pairRespJSON, _ := json.Marshal(pairResp)
 
-	// --- All error codes (rp2s-peter §3.2) ---
+	// All error codes
 	allErrors := []NamedJSON{
 		{Name: "ILLEGAL_REQUEST_DATA", JSON: mustJSON(r2ps.ErrorResponse{ErrorCode: r2ps.ErrIllegalRequestData, ErrorMessage: "malformed request"})},
 		{Name: "UNAUTHORIZED", JSON: mustJSON(r2ps.ErrorResponse{ErrorCode: r2ps.ErrUnauthorized, ErrorMessage: "invalid credentials"})},
@@ -329,150 +310,101 @@ func TestGenerateGoVectors(t *testing.T) {
 		{Name: "TRY_LATER", JSON: mustJSON(r2ps.ErrorResponse{ErrorCode: r2ps.ErrTryLater, ErrorMessage: "service busy"})},
 	}
 
-	// --- PAKE registration flow (rp2s-peter §3.3.3.1) ---
-	pakeRegEvalReq, _ := json.Marshal(r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      "cmVnaXN0cmF0aW9uLXJlcXVlc3Q",
+	// 2FA registration flow
+	tfaRegEvalReq, _ := json.Marshal(r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateEvaluate,
+		Request: "cmVnaXN0cmF0aW9uLXJlcXVlc3Q",
 	})
-	pakeRegEvalResp, _ := json.Marshal(r2ps.PAKEResponse{
-		Resp: "cmVnaXN0cmF0aW9uLXJlc3BvbnNl",
+	tfaRegEvalResp, _ := json.Marshal(r2ps.TFAResponseData{
+		Response: "cmVnaXN0cmF0aW9uLXJlc3BvbnNl",
 	})
-	pakeRegFinReq, _ := json.Marshal(r2ps.PAKERequest{
-		Protocol:      r2ps.PAKEProtocolOPAQUE,
-		State:         r2ps.PAKEStateFinalize,
+	tfaRegFinReq, _ := json.Marshal(r2ps.TFARequestData{
+		TFAMode:       r2ps.TFAModeOPAQUE,
+		State:         r2ps.StateFinalize,
+		Request:       "cmVnaXN0cmF0aW9uLXJlY29yZA",
 		Authorization: "YXV0aG9yaXphdGlvbi1kYXRh",
-		Req:           "cmVnaXN0cmF0aW9uLXJlY29yZA",
 	})
-	pakeRegFinResp, _ := json.Marshal(r2ps.PAKEResponse{
-		Msg: "OK",
+	tfaRegFinResp, _ := json.Marshal(r2ps.TFAResponseData{
+		Message: "success",
 	})
 
-	// --- PAKE authentication flow (rp2s-peter §3.3.3.2) ---
-	pakeAuthEvalReq, _ := json.Marshal(r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      "S0UxLWJ5dGVz",
+	// 2FA auth flow
+	tfaAuthEvalReq, _ := json.Marshal(r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateEvaluate,
+		Request: "S0UxLWJ5dGVz",
 	})
-	pakeAuthEvalResp, _ := json.Marshal(r2ps.PAKEResponse{
-		PakeSessionID: "auth-session-001",
-		Resp:          "S0UyLWJ5dGVz",
+	tfaAuthEvalResp, _ := json.Marshal(r2ps.TFAAuthResponseData{
+		TFASessionID: "auth-session-001",
+		Response:     "S0UyLWJ5dGVz",
 	})
-	pakeAuthFinReq, _ := json.Marshal(r2ps.PAKERequest{
-		Protocol:        r2ps.PAKEProtocolOPAQUE,
-		State:           r2ps.PAKEStateFinalize,
-		Task:            "sign",
-		SessionDuration: 30,
-		Req:             "S0UzLWJ5dGVz",
+	tfaAuthFinReq, _ := json.Marshal(r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateFinalize,
+		Request: "S0UzLWJ5dGVz",
 	})
-	pakeAuthFinResp, _ := json.Marshal(r2ps.PAKEResponse{
-		PakeSessionID:         "auth-session-001",
-		Task:                  "sign",
-		Msg:                   "OK",
+	tfaAuthFinResp, _ := json.Marshal(r2ps.TFAAuthResponseData{
+		TFASessionID:          "auth-session-001",
+		Message:               "authenticated",
 		SessionExpirationTime: 1716403600,
 	})
 
-	// --- PAKE PIN change (rp2s-peter §3.3.3.3) ---
-	pakePinChgEvalReq, _ := json.Marshal(r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      "bmV3LXBpbi1yZWdpc3RyYXRpb24tcmVxdWVzdA",
+	// 2FA change flow
+	tfaChgEvalReq, _ := json.Marshal(r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateEvaluate,
+		Request: "bmV3LXJlZ2lzdHJhdGlvbi1yZXF1ZXN0",
 	})
-	pakePinChgFinReq, _ := json.Marshal(r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateFinalize,
-		Req:      "bmV3LXBpbi1yZWdpc3RyYXRpb24tcmVjb3Jk",
-		// No authorization for PIN change (encrypted under existing session)
+	tfaChgFinReq, _ := json.Marshal(r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateFinalize,
+		Request: "bmV3LXJlZ2lzdHJhdGlvbi1yZWNvcmQ",
 	})
 
-	// --- Enc mode constraints (rp2s-peter §3.3) ---
-	encConstraints := []EncModeConstraint{
-		{Type: r2ps.TypePINRegistration, RequiredEnc: r2ps.EncDevice, RequestJSON: mustJSON(r2ps.ServiceRequest{
-			Ver: r2ps.ProtocolVersion, Nonce: "bm9uY2U", Iat: 1716400000,
-			Enc: r2ps.EncDevice, Data: "ZGF0YQ", ClientID: "c1", Kid: "k1",
-			Context: "hsm", Type: r2ps.TypePINRegistration,
-		})},
-		{Type: r2ps.TypeAuthenticate, RequiredEnc: r2ps.EncDevice, RequestJSON: mustJSON(r2ps.ServiceRequest{
-			Ver: r2ps.ProtocolVersion, Nonce: "bm9uY2U", Iat: 1716400000,
-			Enc: r2ps.EncDevice, Data: "ZGF0YQ", ClientID: "c1", Kid: "k1",
-			Context: "hsm", Type: r2ps.TypeAuthenticate,
-		})},
-		{Type: r2ps.TypePINChange, RequiredEnc: r2ps.EncUser, RequestJSON: mustJSON(r2ps.ServiceRequest{
-			Ver: r2ps.ProtocolVersion, Nonce: "bm9uY2U", Iat: 1716400000,
-			Enc: r2ps.EncUser, Data: "ZGF0YQ", ClientID: "c1", Kid: "k1",
-			Context: "hsm", Type: r2ps.TypePINChange, PakeSessionID: "sess-1",
-		})},
+	// Mode constraints
+	modeConstraints := []ModeConstraint{
+		{Type: r2ps.Type2FARegistration, RequiredMode: "1FA"},
+		{Type: r2ps.Type2FAAuthenticate, RequiredMode: "1FA"},
+		{Type: r2ps.Type2FAChange, RequiredMode: "2FA"},
+		{Type: r2ps.TypeP256Generate, RequiredMode: "1FA"},
+		{Type: r2ps.TypeSignECDSA, RequiredMode: "2FA"},
+		{Type: r2ps.TypeAgreeECDH, RequiredMode: "2FA"},
+		{Type: r2ps.TypeEUDIWWKAETSI, RequiredMode: "1FA"},
+		{Type: r2ps.TypeEUDIWWIAETSI, RequiredMode: "1FA"},
 	}
 
-	// --- HSM service types (spec-compliant field names) ---
+	// HSM service types
 	keygenReq, _ := json.Marshal(SpecECKeygenRequest{Curve: "P-256"})
 	keygenResp, _ := json.Marshal(SpecECKeygenResponse{CreatedKey: "P-256"})
-
 	ecdsaReq, _ := json.Marshal(SpecECDSARequest{
 		Kid:     "03fbe636059033a07ee3099caf84a87474d94afa2c7d431f3391ebd8cf21a24216",
 		TbsHash: "YUHJYghlxa4CTkBEKvtPmiA+jCMUURknHs19sd7bNjs=",
 	})
 	ecdsaRespDER, _ := hex.DecodeString("30440220260a6228484119be74f7f8f46f964af0433b1f1218e667a92e82e45e48ef488d02207cfe73d85a7b81d7853aa680ba4a0ee17120f7fd87b7542b34f79863052abcbf")
-
 	ecdhReq, _ := json.Marshal(SpecECDHRequest{
 		Kid:       "0294ddc3fd5554688bf619987b63bbb09b13e0d04b8a9da493309eef3f41767228",
 		PublicKey: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETpEgaHsA2UTbSkn7hJb3KfvrlAMb+p715Gw/q5x01ZgQZWL7xURVYB9Fw+B7TK+GYMShDJYjLlKva5f+KkTx3w==",
 	})
 	ecdhRespSecret, _ := hex.DecodeString("ad91d860a109cce0e7d334813f434be8d44a21f8b3677cfe00c25fb572950687")
-
 	listReq, _ := json.Marshal(SpecListKeysRequest{Curve: []string{"P-256"}})
-	listResp, _ := json.Marshal(SpecListKeysResponse{KeyInfo: []SpecKeyInfo{
-		{
-			Kid:          "03fbe636059033a07ee3099caf84a87474d94afa2c7d431f3391ebd8cf21a24216",
-			CurveName:    "P-256",
-			CreationTime: 1750751069,
-			PublicKey:    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE++Y2BZAzoH7jCZyvhKh0dNlK+ix9Qx8zkevYzyGiQhYdmIZjwS5S9fMegmKL685ctyQMNS8Jh1QayMYzwpL4AQ==",
-		},
-	}})
+	listResp, _ := json.Marshal(SpecListKeysResponse{KeyInfo: []SpecKeyInfo{{
+		Kid:       "03fbe636059033a07ee3099caf84a87474d94afa2c7d431f3391ebd8cf21a24216",
+		CurveName: "P-256", CreationTime: 1750751069,
+		PublicKey: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE++Y2BZAzoH7jCZyvhKh0dNlK+ix9Qx8zkevYzyGiQhYdmIZjwS5S9fMegmKL685ctyQMNS8Jh1QayMYzwpL4AQ==",
+	}}})
 
-	// Multi-curve keygen (§1)
-	keygenP384Req, _ := json.Marshal(SpecECKeygenRequest{Curve: "P-384"})
-	keygenP384Resp, _ := json.Marshal(SpecECKeygenResponse{CreatedKey: "P-384"})
-	keygenP521Req, _ := json.Marshal(SpecECKeygenRequest{Curve: "P-521"})
-	keygenP521Resp, _ := json.Marshal(SpecECKeygenResponse{CreatedKey: "P-521"})
+	// EUDIW service types — updated per r2ps-service-types-eudiw.md
+	wkaReq, _ := json.Marshal(SpecWKARequest{KeysToAttest: []string{"key-0"}, Ver: "draft-008"})
+	wkaResp, _ := json.Marshal(SpecWKAResponse{WKA: "eyJ0eXAiOiJrZXktYXR0ZXN0YXRpb24rand0IiwiYWxnIjoiRVMyNTYiLCJ4NWMiOlsiTUlJRFFqQ0NBLi4uIl19.eyJpYXQiOjE3MTY0MDAwMDAsImV4cCI6MTcxNjQ4NjQwMCwid2FsbGV0X2xpbmsiOiJodHRwczovL3dwLmV4YW1wbGUuY29tL2V1ZGl3LWluZm8ifQ.fake-signature"})
+	wiaReq, _ := json.Marshal(SpecWIARequest{KeysToAttest: []string{"key-0"}, Ver: "draft-008"})
+	wiaResp, _ := json.Marshal(SpecWIAResponse{WIA: "eyJ0eXAiOiJvYXV0aC1jbGllbnQtYXR0ZXN0YXRpb24rand0IiwiYWxnIjoiRVMyNTYiLCJ4NWMiOlsiTUlJRERUQ0NBLi4uIl19.eyJpYXQiOjE3MTY0MDAwMDAsImV4cCI6MTcxNjQ4NjQwMCwic3ViIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS93YWxsZXQvMSJ9.fake-signature"})
 
-	// Empty-filter list_keys (§2.2: absent or empty list → list all)
-	listAllReq, _ := json.Marshal(SpecListKeysRequest{Curve: []string{}})
-	listAllResp, _ := json.Marshal(SpecListKeysResponse{KeyInfo: []SpecKeyInfo{
-		{
-			Kid:          "0308345940bc96d1ea6456ff753596281ff8cec4dfb0a1a82a0a3508b0ac5e17d8072b6bfcc17aa5e6d97d863f2017aa09",
-			CurveName:    "P-384",
-			CreationTime: 1750751069,
-			PublicKey:    "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAECDRZQLyW0epkVv91NZYoH/jOxN+woagqCjUIsKxeF9gHK2v8wXql5tl9hj8gF6oJ3MZ45jdnRNGIG8O+LtWMraR0irerNaHb165jC9+reCXRkVZLr0q7nvgbq18zxuoR",
-		},
-		{
-			Kid:          "03fbe636059033a07ee3099caf84a87474d94afa2c7d431f3391ebd8cf21a24216",
-			CurveName:    "P-256",
-			CreationTime: 1750751069,
-			PublicKey:    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE++Y2BZAzoH7jCZyvhKh0dNlK+ix9Qx8zkevYzyGiQhYdmIZjwS5S9fMegmKL685ctyQMNS8Jh1QayMYzwpL4AQ==",
-		},
-		{
-			Kid:          "0301e5a88aca8d54fb87a52cdd5d6f4e8a16f147a10c133b7c4adc4cf3c867f68410d5de1582bc8d74d7f91853758931bd2c8badcd2ff9ab7b49832a4a058451c0a8d2",
-			CurveName:    "P-521",
-			CreationTime: 1750751069,
-			PublicKey:    "MIGbMBAGByqGSM49AgEGBSuBBAAjA4GGAAQB5aiKyo1U+4elLN1db06KFvFHoQwTO3xK3EzzyGf2hBDV3hWCvI101/kYU3WJMb0si63NL/mre0mDKkoFhFHAqNIBQkoUyt32fqcaSSyf00VQvJHOKF8s7V8SF4HAJpTmFF53uGjoul02v6wy3LPlmKGYpfH/FJcK9/B3oqxDvI5ciis=",
-		},
-	}})
-
-	// --- EUDIW service types (r2ps-service-types-eudiw.md) ---
-	wkaReq, _ := json.Marshal(SpecWKARequest{
-		KeysToAttest: []string{"key-0"},
-		Ver:          "d008",
-	})
-	wkaResp, _ := json.Marshal(SpecWKAResponse{
-		Attestation: "eyJ0eXAiOiJrZXktYXR0ZXN0YXRpb24rand0IiwiYWxnIjoiRVMyNTYiLCJ4NWMiOlsiTUlJRFFqQ0NBLi4uIl19.eyJpYXQiOjE3MTY0MDAwMDAsImV4cCI6MTcxNjQ4NjQwMCwid2FsbGV0X2xpbmsiOiJodHRwczovL3dwLmV4YW1wbGUuY29tL2V1ZGl3LWluZm8ifQ.fake-signature",
-	})
-	wiaReq, _ := json.Marshal(SpecWIARequest{
-		Ver: "d008",
-	})
-	wiaResp, _ := json.Marshal(SpecWIAResponse{
-		Attestation: "eyJ0eXAiOiJvYXV0aC1jbGllbnQtYXR0ZXN0YXRpb24rand0IiwiYWxnIjoiRVMyNTYiLCJ4NWMiOlsiTUlJRERUQ0NBLi4uIl19.eyJpYXQiOjE3MTY0MDAwMDAsImV4cCI6MTcxNjQ4NjQwMCwic3ViIjoiaHR0cHM6Ly9leGFtcGxlLmNvbS93YWxsZXQvMSJ9.fake-signature",
-	})
+	// HKDF KEK derivation vectors
+	hkdfSessionKey := icrypto.RandomBytes(32)
+	hkdfSessionID := "test-session-001"
+	kekC2S, _ := icrypto.Derive2FAKEK(hkdfSessionKey, "c2s", hkdfSessionID)
+	kekS2C, _ := icrypto.Derive2FAKEK(hkdfSessionKey, "s2c", hkdfSessionID)
 
 	vectors := TestVectors{
 		Generator: "go-r2ps-service",
@@ -499,27 +431,24 @@ func TestGenerateGoVectors(t *testing.T) {
 		Protocol: ProtocolVectors{
 			ServiceRequestJSON:  string(svcReqJSON),
 			ServiceResponseJSON: string(svcRespJSON),
-			PAKERequestJSON:     string(pakeReqJSON),
-			PAKEResponseJSON:    string(pakeRespJSON),
+			TFARequestJSON:      string(tfaReqJSON),
+			TFAResponseJSON:     string(tfaRespJSON),
 			ErrorResponseJSON:   string(errRespJSON),
-
 			RequestResponsePairs: []RequestResponsePair{
-				{Name: "ecdsa_sign", Request: string(pairReqJSON), Response: string(pairRespJSON)},
+				{Name: "sign_ecdsa", Request: string(pairReqJSON), Response: string(pairRespJSON)},
 			},
-			AllErrorResponses: allErrors,
-
-			PAKERegistrationEvaluateReq:  string(pakeRegEvalReq),
-			PAKERegistrationEvaluateResp: string(pakeRegEvalResp),
-			PAKERegistrationFinalizeReq:  string(pakeRegFinReq),
-			PAKERegistrationFinalizeResp: string(pakeRegFinResp),
-			PAKEAuthEvaluateReq:          string(pakeAuthEvalReq),
-			PAKEAuthEvaluateResp:         string(pakeAuthEvalResp),
-			PAKEAuthFinalizeReq:          string(pakeAuthFinReq),
-			PAKEAuthFinalizeResp:         string(pakeAuthFinResp),
-			PAKEPinChangeEvaluateReq:     string(pakePinChgEvalReq),
-			PAKEPinChangeFinalizeReq:     string(pakePinChgFinReq),
-
-			EncModeConstraints: encConstraints,
+			AllErrorResponses:    allErrors,
+			TFARegEvaluateReq:    string(tfaRegEvalReq),
+			TFARegEvaluateResp:   string(tfaRegEvalResp),
+			TFARegFinalizeReq:    string(tfaRegFinReq),
+			TFARegFinalizeResp:   string(tfaRegFinResp),
+			TFAAuthEvaluateReq:   string(tfaAuthEvalReq),
+			TFAAuthEvaluateResp:  string(tfaAuthEvalResp),
+			TFAAuthFinalizeReq:   string(tfaAuthFinReq),
+			TFAAuthFinalizeResp:  string(tfaAuthFinResp),
+			TFAChangeEvaluateReq: string(tfaChgEvalReq),
+			TFAChangeFinalizeReq: string(tfaChgFinReq),
+			ModeConstraints:      modeConstraints,
 		},
 		HSM: HSMVectors{
 			ECKeygenRequestJSON:  string(keygenReq),
@@ -530,20 +459,18 @@ func TestGenerateGoVectors(t *testing.T) {
 			ECDHResponseHex:      hex.EncodeToString(ecdhRespSecret),
 			ListKeysRequestJSON:  string(listReq),
 			ListKeysResponseJSON: string(listResp),
-
-			KeygenP384RequestJSON:  string(keygenP384Req),
-			KeygenP384ResponseJSON: string(keygenP384Resp),
-			KeygenP521RequestJSON:  string(keygenP521Req),
-			KeygenP521ResponseJSON: string(keygenP521Resp),
-
-			ListAllKeysRequestJSON:  string(listAllReq),
-			ListAllKeysResponseJSON: string(listAllResp),
 		},
 		EUDIW: EUDIWVectors{
 			WKARequestJSON:  string(wkaReq),
 			WKAResponseJSON: string(wkaResp),
 			WIARequestJSON:  string(wiaReq),
 			WIAResponseJSON: string(wiaResp),
+		},
+		HKDF: HKDFVectors{
+			SessionKeyHex: hex.EncodeToString(hkdfSessionKey),
+			SessionID:     hkdfSessionID,
+			KEKC2SHex:     hex.EncodeToString(kekC2S),
+			KEKS2CHex:     hex.EncodeToString(kekS2C),
 		},
 	}
 
@@ -562,7 +489,6 @@ func TestGenerateGoVectors(t *testing.T) {
 	t.Logf("wrote %d bytes to %s", len(out), outPath)
 }
 
-// mustJSON marshals v to a JSON string; panics on error.
 func mustJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -571,7 +497,6 @@ func mustJSON(v any) string {
 	return string(b)
 }
 
-// loadVectors reads and parses a test vectors JSON file.
 func loadVectors(t *testing.T, path string) *TestVectors {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -585,7 +510,6 @@ func loadVectors(t *testing.T, path string) *TestVectors {
 	return &v
 }
 
-// parseECPrivateKey extracts an *ecdsa.PrivateKey from PEM-encoded PKCS#8.
 func parseECPrivateKey(t *testing.T, pemData string) *ecdsa.PrivateKey {
 	t.Helper()
 	block, _ := pem.Decode([]byte(pemData))
@@ -603,7 +527,6 @@ func parseECPrivateKey(t *testing.T, pemData string) *ecdsa.PrivateKey {
 	return ecKey
 }
 
-// parseECPublicKey extracts an *ecdsa.PublicKey from PEM-encoded SPKI.
 func parseECPublicKey(t *testing.T, pemData string) *ecdsa.PublicKey {
 	t.Helper()
 	block, _ := pem.Decode([]byte(pemData))

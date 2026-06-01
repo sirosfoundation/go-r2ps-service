@@ -193,11 +193,9 @@ func TestSessionStore(t *testing.T) {
 	sess := &Session{
 		ID:         "test-session-1",
 		ClientID:   "client-1",
-		Kid:        "key-1",
 		Context:    "signing",
 		SessionKey: []byte("session-key-bytes"),
 		ClientMAC:  []byte("mac-bytes"),
-		Task:       "signHash",
 		ExpiresAt:  time.Now().Add(5 * time.Minute),
 	}
 

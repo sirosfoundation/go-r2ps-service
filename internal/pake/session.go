@@ -6,15 +6,13 @@ import (
 	"time"
 )
 
-// Session represents an active PAKE session with its negotiated key material.
+// Session represents an active 2FA session with its negotiated key material.
 type Session struct {
 	ID         string
 	ClientID   string
-	Kid        string
 	Context    string
 	SessionKey []byte
 	ClientMAC  []byte // expected client MAC for KE3 verification
-	Task       string
 	ExpiresAt  time.Time
 	Verified   bool // true after KE3 has been verified
 }

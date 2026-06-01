@@ -18,12 +18,11 @@ import (
 
 // RecordStore abstracts persistence of OPAQUE client records.
 type RecordStore interface {
-	GetRecord(clientID, kid string) (*opaque.ClientRecord, error)
-	PutRecord(clientID, kid string, record *opaque.ClientRecord) error
+	GetRecord(clientID, context string) (*opaque.ClientRecord, error)
+	PutRecord(clientID, context string, record *opaque.ClientRecord) error
 }
 
-// ClientKeyStore resolves a client's public key by kid.
-// If not configured, the dispatcher falls back to using the server key for JWS verification.
+// ClientKeyStore resolves a client's public key by kid (JWK thumbprint of CSK).
 type ClientKeyStore interface {
 	GetClientKey(kid string) (*ecdsa.PublicKey, error)
 }
@@ -37,20 +36,20 @@ func NewInMemoryRecordStore() *InMemoryRecordStore {
 	return &InMemoryRecordStore{records: make(map[string]*opaque.ClientRecord)}
 }
 
-func (s *InMemoryRecordStore) GetRecord(clientID, kid string) (*opaque.ClientRecord, error) {
-	r, ok := s.records[clientID+"|"+kid]
+func (s *InMemoryRecordStore) GetRecord(clientID, ctx string) (*opaque.ClientRecord, error) {
+	r, ok := s.records[clientID+"|"+ctx]
 	if !ok {
-		return nil, fmt.Errorf("no record for %s/%s", clientID, kid)
+		return nil, fmt.Errorf("no record for %s/%s", clientID, ctx)
 	}
 	return r, nil
 }
 
-func (s *InMemoryRecordStore) PutRecord(clientID, kid string, record *opaque.ClientRecord) error {
-	s.records[clientID+"|"+kid] = record
+func (s *InMemoryRecordStore) PutRecord(clientID, ctx string, record *opaque.ClientRecord) error {
+	s.records[clientID+"|"+ctx] = record
 	return nil
 }
 
-// Dispatcher processes R2PS requests: verifies JWS, routes to PAKE or service handlers.
+// Dispatcher processes R2PS requests: verifies JWS, routes to 2FA or service handlers.
 type Dispatcher struct {
 	serverKey  *ecdsa.PrivateKey
 	opaque     *pake.OPAQUEServer
@@ -134,7 +133,8 @@ func (d *Dispatcher) StartSessionCleanup(interval time.Duration) {
 	}()
 }
 
-// Process handles a raw R2PS POST body (JWS compact serialization).
+// Process handles a raw R2PS request body (JWS compact serialization, already
+// decrypted from the outer JWE at the transport layer).
 // Returns a JWS compact serialization response or an error response.
 func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
 	// Look up the verification key using the JWS kid header.
@@ -180,102 +180,96 @@ func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
 
 	// Route by type
 	switch req.Type {
-	case r2ps.TypePINRegistration:
-		return d.handlePAKE(ctx, &req)
-	case r2ps.TypeAuthenticate:
-		return d.handlePAKE(ctx, &req)
-	case r2ps.TypePINChange:
-		return d.handlePINChange(ctx, &req)
+	case r2ps.Type2FARegistration:
+		return d.handle2FA(ctx, &req)
+	case r2ps.Type2FAAuthenticate:
+		return d.handle2FA(ctx, &req)
+	case r2ps.Type2FAChange:
+		return d.handle2FAChange(ctx, &req)
 	default:
 		return d.handleService(ctx, &req)
 	}
 }
 
-func (d *Dispatcher) handlePAKE(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
-	// Decrypt data (device-encrypted)
-	dataBytes, err := d.decryptRequestData(req)
+func (d *Dispatcher) handle2FA(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
+	var tfaReq r2ps.TFARequestData
+	if err := json.Unmarshal(req.Data, &tfaReq); err != nil {
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "malformed 2FA data"}
+	}
+
+	if tfaReq.TFAMode != r2ps.TFAModeOPAQUE {
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "unsupported 2fa_mode"}
+	}
+
+	reqData, err := base64.URLEncoding.DecodeString(tfaReq.Request)
 	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "decrypt failed"}
-	}
-
-	var pakeReq r2ps.PAKERequest
-	if err := json.Unmarshal(dataBytes, &pakeReq); err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "malformed PAKE data"}
-	}
-
-	if pakeReq.Protocol != r2ps.PAKEProtocolOPAQUE {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "unsupported PAKE protocol"}
-	}
-
-	reqData, err := base64.URLEncoding.DecodeString(pakeReq.Req)
-	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid req encoding"}
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid request encoding"}
 	}
 
 	switch {
-	case req.Type == r2ps.TypePINRegistration && pakeReq.State == r2ps.PAKEStateEvaluate:
-		return d.regEvaluate(ctx, req, &pakeReq, reqData)
-	case req.Type == r2ps.TypePINRegistration && pakeReq.State == r2ps.PAKEStateFinalize:
-		return d.regFinalize(ctx, req, &pakeReq, reqData)
-	case req.Type == r2ps.TypePINChange && pakeReq.State == r2ps.PAKEStateEvaluate:
-		return d.regEvaluate(ctx, req, &pakeReq, reqData)
-	case req.Type == r2ps.TypePINChange && pakeReq.State == r2ps.PAKEStateFinalize:
-		return d.regFinalize(ctx, req, &pakeReq, reqData)
-	case req.Type == r2ps.TypeAuthenticate && pakeReq.State == r2ps.PAKEStateEvaluate:
-		return d.authEvaluate(ctx, req, &pakeReq, reqData)
-	case req.Type == r2ps.TypeAuthenticate && pakeReq.State == r2ps.PAKEStateFinalize:
-		return d.authFinalize(ctx, req, &pakeReq, reqData)
+	case req.Type == r2ps.Type2FARegistration && tfaReq.State == r2ps.StateEvaluate:
+		return d.regEvaluate(ctx, req, &tfaReq, reqData)
+	case req.Type == r2ps.Type2FARegistration && tfaReq.State == r2ps.StateFinalize:
+		return d.regFinalize(ctx, req, &tfaReq, reqData)
+	case req.Type == r2ps.Type2FAChange && tfaReq.State == r2ps.StateEvaluate:
+		return d.regEvaluate(ctx, req, &tfaReq, reqData)
+	case req.Type == r2ps.Type2FAChange && tfaReq.State == r2ps.StateFinalize:
+		return d.regFinalize(ctx, req, &tfaReq, reqData)
+	case req.Type == r2ps.Type2FAAuthenticate && tfaReq.State == r2ps.StateEvaluate:
+		return d.authEvaluate(ctx, req, &tfaReq, reqData)
+	case req.Type == r2ps.Type2FAAuthenticate && tfaReq.State == r2ps.StateFinalize:
+		return d.authFinalize(ctx, req, &tfaReq, reqData)
 	default:
 		return nil, &R2PSError{Code: r2ps.ErrIllegalState, Msg: "invalid type/state combination"}
 	}
 }
 
-func (d *Dispatcher) regEvaluate(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.PAKERequest, reqData []byte) ([]byte, error) {
-	credID := []byte(req.Context + "|" + req.ClientID + "|" + req.Kid)
+func (d *Dispatcher) regEvaluate(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.TFARequestData, reqData []byte) ([]byte, error) {
+	credID := []byte(req.Context + "|" + req.ClientID)
 	respBytes, err := d.opaque.RegistrationResponse(reqData, credID)
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "registration evaluate failed"}
 	}
 
-	pakeResp := r2ps.PAKEResponse{
-		Resp: base64.URLEncoding.EncodeToString(respBytes),
+	tfaResp := r2ps.TFAResponseData{
+		Response: base64.URLEncoding.EncodeToString(respBytes),
 	}
-	return d.encryptAndSign(req, &pakeResp)
+	return d.signResponse(req, &tfaResp)
 }
 
-func (d *Dispatcher) regFinalize(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.PAKERequest, reqData []byte) ([]byte, error) {
+func (d *Dispatcher) regFinalize(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.TFARequestData, reqData []byte) ([]byte, error) {
 	record, err := d.opaque.DeserializeRegistrationRecord(reqData)
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid registration record"}
 	}
 
-	credID := []byte(req.Context + "|" + req.ClientID + "|" + req.Kid)
+	credID := []byte(req.Context + "|" + req.ClientID)
 	clientRecord := &opaque.ClientRecord{
 		RegistrationRecord:   record,
 		CredentialIdentifier: credID,
 		ClientIdentity:       nil,
 	}
 
-	if err := d.records.PutRecord(req.ClientID, req.Kid, clientRecord); err != nil {
+	if err := d.records.PutRecord(req.ClientID, req.Context, clientRecord); err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "store record failed"}
 	}
 
-	pakeResp := r2ps.PAKEResponse{
-		Msg: "registration complete",
+	tfaResp := r2ps.TFAResponseData{
+		Message: "success",
 	}
-	return d.encryptAndSign(req, &pakeResp)
+	return d.signResponse(req, &tfaResp)
 }
 
-func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, pakeReq *r2ps.PAKERequest, reqData []byte) ([]byte, error) {
+func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.TFARequestData, reqData []byte) ([]byte, error) {
 	// Check lockout
-	if err := d.counter.Check(req.ClientID, req.Kid, req.Context); err != nil {
+	if err := d.counter.Check(req.ClientID, req.Context, req.Context); err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: err.Error()}
 	}
 
-	record, err := d.records.GetRecord(req.ClientID, req.Kid)
+	record, err := d.records.GetRecord(req.ClientID, req.Context)
 	if err != nil {
 		// Unknown client: use fake record to prevent client enumeration
-		record = d.opaque.FakeRecord([]byte(req.Context + "|" + req.ClientID + "|" + req.Kid))
+		record = d.opaque.FakeRecord([]byte(req.Context + "|" + req.ClientID))
 	}
 
 	ke2Bytes, clientMAC, sessionSecret, err := d.opaque.AuthEvaluate(reqData, record)
@@ -287,7 +281,6 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, p
 	sess := &pake.Session{
 		ID:         sessionID,
 		ClientID:   req.ClientID,
-		Kid:        req.Kid,
 		Context:    req.Context,
 		SessionKey: sessionSecret,
 		ClientMAC:  clientMAC,
@@ -298,62 +291,45 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, p
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "session creation failed"}
 	}
 
-	pakeResp := r2ps.PAKEResponse{
-		PakeSessionID: sessionID,
-		Resp:          base64.URLEncoding.EncodeToString(ke2Bytes),
+	tfaResp := r2ps.TFAAuthResponseData{
+		TFASessionID: sessionID,
+		Response:     base64.URLEncoding.EncodeToString(ke2Bytes),
 	}
-	return d.encryptAndSign(req, &pakeResp)
+	return d.signResponse(req, &tfaResp)
 }
 
-func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, pakeReq *r2ps.PAKERequest, reqData []byte) ([]byte, error) {
-	sess := d.sessions.Get(req.PakeSessionID)
+func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.TFARequestData, reqData []byte) ([]byte, error) {
+	sess := d.sessions.Get(req.TFASessionID)
 	if sess == nil {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalState, Msg: "session not found or expired"}
 	}
 
 	if err := d.opaque.AuthFinalize(reqData, sess.ClientMAC); err != nil {
-		_ = d.counter.RecordFailure(req.ClientID, req.Kid, req.Context)
-		d.sessions.Delete(req.PakeSessionID)
+		_ = d.counter.RecordFailure(req.ClientID, req.Context, req.Context)
+		d.sessions.Delete(req.TFASessionID)
 		PAKEAuthTotal.WithLabelValues("failure").Inc()
 		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "authentication failed"}
 	}
 
 	// Success — reset counter and mark session verified
-	d.counter.RecordSuccess(req.ClientID, req.Kid, req.Context)
-	if err := d.sessions.MarkVerified(req.PakeSessionID); err != nil {
+	d.counter.RecordSuccess(req.ClientID, req.Context, req.Context)
+	if err := d.sessions.MarkVerified(req.TFASessionID); err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "session update failed"}
 	}
 	PAKEAuthTotal.WithLabelValues("success").Inc()
 	ActiveSessions.Inc()
 
-	// Apply task and session_duration from finalize request (per spec)
-	if pakeReq.Task != "" {
-		sess.Task = pakeReq.Task
-	}
-	if pakeReq.SessionDuration > 0 {
-		requested := time.Duration(pakeReq.SessionDuration) * time.Second
-		if requested < d.sessionTTL {
-			sess.ExpiresAt = time.Now().Add(requested)
-		}
-	}
-
-	pakeResp := r2ps.PAKEResponse{
-		PakeSessionID:         req.PakeSessionID,
-		Msg:                   "authenticated",
-		Task:                  pakeReq.Task,
+	tfaResp := r2ps.TFAAuthResponseData{
+		TFASessionID:          req.TFASessionID,
+		Message:               "authenticated",
 		SessionExpirationTime: sess.ExpiresAt.Unix(),
 	}
-	return d.encryptAndSign(req, &pakeResp)
+	return d.signResponse(req, &tfaResp)
 }
 
-// handlePINChange requires an authenticated session before re-registering a PIN.
-func (d *Dispatcher) handlePINChange(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
-	// pin_change requires enc=user — the spec mandates user-authenticated encryption
-	if req.Enc != r2ps.EncUser {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "pin_change requires enc=user"}
-	}
-
-	sess := d.sessions.Get(req.PakeSessionID)
+// handle2FAChange requires an authenticated 2FA session before re-registering.
+func (d *Dispatcher) handle2FAChange(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
+	sess := d.sessions.Get(req.TFASessionID)
 	if sess == nil {
 		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not found or expired"}
 	}
@@ -366,7 +342,7 @@ func (d *Dispatcher) handlePINChange(ctx context.Context, req *r2ps.ServiceReque
 		return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: "session context mismatch"}
 	}
 
-	return d.handlePAKE(ctx, req)
+	return d.handle2FA(ctx, req)
 }
 
 func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest) ([]byte, error) {
@@ -375,12 +351,8 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		return nil, &R2PSError{Code: r2ps.ErrUnsupportedType, Msg: "unknown service type"}
 	}
 
-	// Service requests require an authenticated session (enc=user)
-	if req.Enc != r2ps.EncUser {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "service requests require enc=user"}
-	}
-
-	sess := d.sessions.Get(req.PakeSessionID)
+	// 2FA service types require an authenticated session
+	sess := d.sessions.Get(req.TFASessionID)
 	if sess == nil {
 		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not found or expired"}
 	}
@@ -393,30 +365,27 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: "session context mismatch"}
 	}
 
-	// Decrypt service data using session key
-	dataBytes, err := icrypto.DecryptJWESymmetric(req.Data, sess.SessionKey[:32])
-	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "decrypt service data failed"}
-	}
-
-	respData, err := handler.Handle(ctx, req.ClientID, dataBytes)
+	// Data is now directly in the JWS payload (not separately encrypted)
+	respData, err := handler.Handle(ctx, req.ClientID, req.Data)
 	if err != nil {
 		slog.Debug("service handler error", "type", req.Type, "error", err)
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: req.Type + " failed"}
 	}
 
-	// Encrypt response data with session key
-	encData, err := icrypto.EncryptJWESymmetric(respData, sess.SessionKey[:32])
-	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "encrypt response failed"}
+	// If the handler returned raw bytes (not JSON), wrap as a JSON string
+	var dataJSON json.RawMessage
+	if json.Valid(respData) {
+		dataJSON = json.RawMessage(respData)
+	} else {
+		encoded := base64.URLEncoding.EncodeToString(respData)
+		dataJSON, _ = json.Marshal(encoded)
 	}
 
 	svcResp := r2ps.ServiceResponse{
 		Ver:   r2ps.ProtocolVersion,
 		Nonce: req.Nonce,
 		Iat:   time.Now().Unix(),
-		Enc:   r2ps.EncUser,
-		Data:  encData,
+		Data:  dataJSON,
 	}
 
 	respJSON, err := json.Marshal(svcResp)
@@ -424,7 +393,7 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal response failed"}
 	}
 
-	signed, err := icrypto.SignJWS(respJSON, d.serverKey, "", "r2ps-response+json")
+	signed, err := icrypto.SignJWS(respJSON, d.serverKey, "", r2ps.TypResponse)
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "sign response failed"}
 	}
@@ -432,46 +401,17 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 	return []byte(signed), nil
 }
 
-func (d *Dispatcher) decryptRequestData(req *r2ps.ServiceRequest) ([]byte, error) {
-	switch req.Enc {
-	case r2ps.EncDevice:
-		return icrypto.DecryptJWE(req.Data, d.serverKey)
-	case r2ps.EncUser:
-		sess := d.sessions.Get(req.PakeSessionID)
-		if sess == nil {
-			return nil, fmt.Errorf("no session for user-encrypted data")
-		}
-		return icrypto.DecryptJWESymmetric(req.Data, sess.SessionKey[:32])
-	default:
-		return nil, fmt.Errorf("unsupported enc mode: %s", req.Enc)
-	}
-}
-
-func (d *Dispatcher) encryptAndSign(req *r2ps.ServiceRequest, pakeResp *r2ps.PAKEResponse) ([]byte, error) {
-	respJSON, err := json.Marshal(pakeResp)
+func (d *Dispatcher) signResponse(req *r2ps.ServiceRequest, data any) ([]byte, error) {
+	dataJSON, err := json.Marshal(data)
 	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal failed"}
-	}
-
-	// Encrypt data to client's context key (device-mode ECDH).
-	// Per spec: server encrypts to client's public context key.
-	recipientKey := &d.serverKey.PublicKey // fallback for dev/test
-	if d.clientKeys != nil {
-		if pk, err := d.clientKeys.GetClientKey(req.Kid); err == nil {
-			recipientKey = pk
-		}
-	}
-	encData, err := icrypto.EncryptJWE(respJSON, recipientKey)
-	if err != nil {
-		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "encrypt failed"}
+		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal data failed"}
 	}
 
 	svcResp := r2ps.ServiceResponse{
 		Ver:   r2ps.ProtocolVersion,
 		Nonce: req.Nonce,
 		Iat:   time.Now().Unix(),
-		Enc:   r2ps.EncDevice,
-		Data:  encData,
+		Data:  json.RawMessage(dataJSON),
 	}
 
 	svcJSON, err := json.Marshal(svcResp)
@@ -479,7 +419,7 @@ func (d *Dispatcher) encryptAndSign(req *r2ps.ServiceRequest, pakeResp *r2ps.PAK
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal response failed"}
 	}
 
-	signed, err := icrypto.SignJWS(svcJSON, d.serverKey, "", "r2ps-response+json")
+	signed, err := icrypto.SignJWS(svcJSON, d.serverKey, "", r2ps.TypResponse)
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "sign response failed"}
 	}

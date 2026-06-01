@@ -31,7 +31,6 @@ type Transport interface {
 // Client is an R2PS protocol client.
 type Client struct {
 	clientID  string
-	kid       string
 	context   string
 	clientKey *ecdsa.PrivateKey
 	serverPub *ecdsa.PublicKey
@@ -43,10 +42,9 @@ type Client struct {
 }
 
 // NewClient creates a new R2PS client.
-func NewClient(clientID, kid, context string, clientKey *ecdsa.PrivateKey, serverPub *ecdsa.PublicKey, transport Transport) *Client {
+func NewClient(clientID, context string, clientKey *ecdsa.PrivateKey, serverPub *ecdsa.PublicKey, transport Transport) *Client {
 	return &Client{
 		clientID:  clientID,
-		kid:       kid,
 		context:   context,
 		clientKey: clientKey,
 		serverPub: serverPub,
@@ -67,16 +65,20 @@ func (c *Client) Register(password []byte) error {
 		return fmt.Errorf("registration init: %w", err)
 	}
 
-	// Send evaluate request
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      base64.URLEncoding.EncodeToString(regReq.Serialize()),
+	tfaReq := r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateEvaluate,
+		Request: base64.URLEncoding.EncodeToString(regReq.Serialize()),
 	}
 
-	resp, err := c.sendPAKE(r2ps.TypePINRegistration, r2ps.EncDevice, "", &pakeReq)
+	resp, err := c.send2FA(r2ps.Type2FARegistration, "", &tfaReq)
 	if err != nil {
 		return fmt.Errorf("registration evaluate: %w", err)
+	}
+
+	var tfaResp r2ps.TFAResponseData
+	if err := json.Unmarshal(resp, &tfaResp); err != nil {
+		return fmt.Errorf("unmarshal response: %w", err)
 	}
 
 	// Deserialize server's RegistrationResponse
@@ -85,7 +87,7 @@ func (c *Client) Register(password []byte) error {
 		return fmt.Errorf("create deserializer: %w", err)
 	}
 
-	respBytes, err := base64.URLEncoding.DecodeString(resp.Resp)
+	respBytes, err := base64.URLEncoding.DecodeString(tfaResp.Response)
 	if err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
@@ -101,19 +103,19 @@ func (c *Client) Register(password []byte) error {
 		return fmt.Errorf("registration finalize: %w", err)
 	}
 
-	pakeReqFin := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateFinalize,
-		Req:      base64.URLEncoding.EncodeToString(record.Serialize()),
+	tfaReqFin := r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateFinalize,
+		Request: base64.URLEncoding.EncodeToString(record.Serialize()),
 	}
 
-	_, err = c.sendPAKE(r2ps.TypePINRegistration, r2ps.EncDevice, "", &pakeReqFin)
+	_, err = c.send2FA(r2ps.Type2FARegistration, "", &tfaReqFin)
 	return err
 }
 
 // Authenticate performs OPAQUE authentication (evaluate + finalize).
 // On success, sets session ID and key for subsequent service calls.
-func (c *Client) Authenticate(password []byte, task string) error {
+func (c *Client) Authenticate(password []byte) error {
 	client, err := OPAQUEConfig.Client()
 	if err != nil {
 		return fmt.Errorf("create OPAQUE client: %w", err)
@@ -125,16 +127,20 @@ func (c *Client) Authenticate(password []byte, task string) error {
 		return fmt.Errorf("generate KE1: %w", err)
 	}
 
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Task:     task,
-		Req:      base64.URLEncoding.EncodeToString(ke1.Serialize()),
+	tfaReq := r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateEvaluate,
+		Request: base64.URLEncoding.EncodeToString(ke1.Serialize()),
 	}
 
-	resp, err := c.sendPAKE(r2ps.TypeAuthenticate, r2ps.EncDevice, "", &pakeReq)
+	resp, err := c.send2FA(r2ps.Type2FAAuthenticate, "", &tfaReq)
 	if err != nil {
 		return fmt.Errorf("auth evaluate: %w", err)
+	}
+
+	var authResp r2ps.TFAAuthResponseData
+	if err := json.Unmarshal(resp, &authResp); err != nil {
+		return fmt.Errorf("unmarshal auth response: %w", err)
 	}
 
 	// Phase 2: GenerateKE3
@@ -143,7 +149,7 @@ func (c *Client) Authenticate(password []byte, task string) error {
 		return fmt.Errorf("create deserializer: %w", err)
 	}
 
-	ke2Bytes, err := base64.URLEncoding.DecodeString(resp.Resp)
+	ke2Bytes, err := base64.URLEncoding.DecodeString(authResp.Response)
 	if err != nil {
 		return fmt.Errorf("decode KE2: %w", err)
 	}
@@ -158,45 +164,38 @@ func (c *Client) Authenticate(password []byte, task string) error {
 		return fmt.Errorf("generate KE3: %w", err)
 	}
 
-	pakeReqFin := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateFinalize,
-		Req:      base64.URLEncoding.EncodeToString(ke3.Serialize()),
+	tfaReqFin := r2ps.TFARequestData{
+		TFAMode: r2ps.TFAModeOPAQUE,
+		State:   r2ps.StateFinalize,
+		Request: base64.URLEncoding.EncodeToString(ke3.Serialize()),
 	}
 
-	_, err = c.sendPAKE(r2ps.TypeAuthenticate, r2ps.EncDevice, resp.PakeSessionID, &pakeReqFin)
+	_, err = c.send2FA(r2ps.Type2FAAuthenticate, authResp.TFASessionID, &tfaReqFin)
 	if err != nil {
 		return fmt.Errorf("auth finalize: %w", err)
 	}
 
-	c.sessionID = resp.PakeSessionID
+	c.sessionID = authResp.TFASessionID
 	c.sessionKey = sessionKey
 	return nil
 }
 
 // CallService sends an authenticated service request using the session key.
-func (c *Client) CallService(serviceType string, reqData []byte) ([]byte, error) {
+// Data is passed directly as the service-specific payload in the JWS.
+func (c *Client) CallService(serviceType string, reqData json.RawMessage) (json.RawMessage, error) {
 	if c.sessionKey == nil {
 		return nil, fmt.Errorf("not authenticated")
 	}
 
-	// Encrypt service data with session key
-	encData, err := icrypto.EncryptJWESymmetric(reqData, c.sessionKey[:32])
-	if err != nil {
-		return nil, fmt.Errorf("encrypt service data: %w", err)
-	}
-
 	svcReq := r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:           time.Now().Unix(),
-		Enc:           r2ps.EncUser,
-		Data:          encData,
-		ClientID:      c.clientID,
-		Kid:           c.kid,
-		Context:       c.context,
-		Type:          serviceType,
-		PakeSessionID: c.sessionID,
+		Ver:          r2ps.ProtocolVersion,
+		Nonce:        base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:          time.Now().Unix(),
+		Data:         reqData,
+		ClientID:     c.clientID,
+		Context:      c.context,
+		Type:         serviceType,
+		TFASessionID: c.sessionID,
 	}
 
 	reqJSON, err := json.Marshal(svcReq)
@@ -204,7 +203,7 @@ func (c *Client) CallService(serviceType string, reqData []byte) ([]byte, error)
 		return nil, fmt.Errorf("marshal service request: %w", err)
 	}
 
-	signed, err := icrypto.SignJWS(reqJSON, c.clientKey, "")
+	signed, err := icrypto.SignJWS(reqJSON, c.clientKey, "", r2ps.TypRequest)
 	if err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -225,41 +224,27 @@ func (c *Client) CallService(serviceType string, reqData []byte) ([]byte, error)
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 
-	// Decrypt response data
-	plaintext, err := icrypto.DecryptJWESymmetric(svcResp.Data, c.sessionKey[:32])
-	if err != nil {
-		return nil, fmt.Errorf("decrypt response: %w", err)
-	}
-
-	return plaintext, nil
+	return svcResp.Data, nil
 }
 
 // SessionID returns the current session ID (empty if not authenticated).
 func (c *Client) SessionID() string { return c.sessionID }
 
-func (c *Client) sendPAKE(reqType, enc, sessionID string, pakeReq *r2ps.PAKERequest) (*r2ps.PAKEResponse, error) {
-	pakeJSON, err := json.Marshal(pakeReq)
+func (c *Client) send2FA(reqType, sessionID string, tfaReq *r2ps.TFARequestData) (json.RawMessage, error) {
+	tfaJSON, err := json.Marshal(tfaReq)
 	if err != nil {
-		return nil, fmt.Errorf("marshal PAKE request: %w", err)
-	}
-
-	// Encrypt PAKE data
-	encData, err := icrypto.EncryptJWE(pakeJSON, c.serverPub)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt PAKE data: %w", err)
+		return nil, fmt.Errorf("marshal 2FA request: %w", err)
 	}
 
 	svcReq := r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:           time.Now().Unix(),
-		Enc:           enc,
-		Data:          encData,
-		ClientID:      c.clientID,
-		Kid:           c.kid,
-		Context:       c.context,
-		Type:          reqType,
-		PakeSessionID: sessionID,
+		Ver:          r2ps.ProtocolVersion,
+		Nonce:        base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:          time.Now().Unix(),
+		Data:         json.RawMessage(tfaJSON),
+		ClientID:     c.clientID,
+		Context:      c.context,
+		Type:         reqType,
+		TFASessionID: sessionID,
 	}
 
 	reqJSON, err := json.Marshal(svcReq)
@@ -267,7 +252,7 @@ func (c *Client) sendPAKE(reqType, enc, sessionID string, pakeReq *r2ps.PAKERequ
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	signed, err := icrypto.SignJWS(reqJSON, c.clientKey, "")
+	signed, err := icrypto.SignJWS(reqJSON, c.clientKey, "", r2ps.TypRequest)
 	if err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -288,16 +273,5 @@ func (c *Client) sendPAKE(reqType, enc, sessionID string, pakeReq *r2ps.PAKERequ
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
 
-	// Decrypt response data
-	decrypted, err := icrypto.DecryptJWE(svcResp.Data, c.clientKey)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt response: %w", err)
-	}
-
-	var pakeResp r2ps.PAKEResponse
-	if err := json.Unmarshal(decrypted, &pakeResp); err != nil {
-		return nil, fmt.Errorf("unmarshal PAKE response: %w", err)
-	}
-
-	return &pakeResp, nil
+	return svcResp.Data, nil
 }

@@ -121,22 +121,32 @@ func buildSignedRequest(t *testing.T, key *ecdsa.PrivateKey, req *r2ps.ServiceRe
 	return []byte(signed)
 }
 
+// buildTFAData marshals a TFARequestData into json.RawMessage for ServiceRequest.Data.
+func buildTFAData(t *testing.T, tfaReq *r2ps.TFARequestData) json.RawMessage {
+	t.Helper()
+	data, err := json.Marshal(tfaReq)
+	if err != nil {
+		t.Fatalf("marshal TFA data: %v", err)
+	}
+	return json.RawMessage(data)
+}
+
 // --- Record store tests ---
 
 func TestInMemoryRecordStore(t *testing.T) {
 	store := NewInMemoryRecordStore()
 
-	_, err := store.GetRecord("client1", "key1")
+	_, err := store.GetRecord("client1", "ctx1")
 	if err == nil {
 		t.Fatal("expected error for missing record")
 	}
 
 	record := &opaque.ClientRecord{CredentialIdentifier: []byte("test")}
-	if err := store.PutRecord("client1", "key1", record); err != nil {
+	if err := store.PutRecord("client1", "ctx1", record); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
-	got, err := store.GetRecord("client1", "key1")
+	got, err := store.GetRecord("client1", "ctx1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -160,7 +170,6 @@ func TestNewDispatcherDefaults(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Defaults should be applied
 	if d.sessionTTL != 5*time.Minute {
 		t.Errorf("sessionTTL = %v, want 5m", d.sessionTTL)
 	}
@@ -187,7 +196,6 @@ func TestProcessInvalidJWS(t *testing.T) {
 func TestProcessMalformedPayload(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 
-	// Sign invalid JSON
 	signed, err := icrypto.SignJWS([]byte("{broken"), key, "")
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +212,7 @@ func TestProcessWrongVersion(t *testing.T) {
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:  "2.0",
-		Type: r2ps.TypeAuthenticate,
+		Type: r2ps.Type2FAAuthenticate,
 	})
 
 	_, err := d.Process(context.Background(), body)
@@ -222,7 +230,7 @@ func TestProcessUnsupportedType(t *testing.T) {
 		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
 		Iat:   time.Now().Unix(),
 		Type:  "unknown_type",
-		Enc:   r2ps.EncUser,
+		Data:  json.RawMessage(`{}`),
 	})
 
 	_, err := d.Process(context.Background(), body)
@@ -232,34 +240,16 @@ func TestProcessUnsupportedType(t *testing.T) {
 	}
 }
 
-func TestProcessServiceRequiresUserEnc(t *testing.T) {
-	d, key, _ := setupDispatcher(t)
-
-	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:   r2ps.ProtocolVersion,
-		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:   time.Now().Unix(),
-		Type:  r2ps.TypeHSMECKeygen,
-		Enc:   r2ps.EncDevice,
-	})
-
-	_, err := d.Process(context.Background(), body)
-	r2psErr := err.(*R2PSError)
-	if r2psErr.Code != r2ps.ErrIllegalRequestData {
-		t.Errorf("code = %q, want ILLEGAL_REQUEST_DATA", r2psErr.Code)
-	}
-}
-
 func TestProcessServiceRequiresSession(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:           time.Now().Unix(),
-		Type:          r2ps.TypeHSMECKeygen,
-		Enc:           r2ps.EncUser,
-		PakeSessionID: "nonexistent",
+		Ver:          r2ps.ProtocolVersion,
+		Nonce:        base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:          time.Now().Unix(),
+		Type:         r2ps.TypeP256Generate,
+		Data:         json.RawMessage(`{"curve":"P-256"}`),
+		TFASessionID: "nonexistent",
 	})
 
 	_, err := d.Process(context.Background(), body)
@@ -269,13 +259,13 @@ func TestProcessServiceRequiresSession(t *testing.T) {
 	}
 }
 
-// --- Full PAKE registration + auth + service flow ---
+// --- Full 2FA registration + auth + service flow ---
 
 func TestFullProtocolFlow(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 	ctx := context.Background()
 	clientID := "https://example.com/wallet/1"
-	kid := "test-key-1"
+	ctxName := "test"
 
 	// --- Registration evaluate ---
 	client, err := pake.OPAQUEConfig.Client()
@@ -288,24 +278,18 @@ func TestFullProtocolFlow(t *testing.T) {
 		t.Fatalf("reg init: %v", err)
 	}
 
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      base64.URLEncoding.EncodeToString(regReq.Serialize()),
-	}
-	pakeJSON, _ := json.Marshal(pakeReq)
-	encData, _ := icrypto.EncryptJWE(pakeJSON, &key.PublicKey)
-
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:      r2ps.ProtocolVersion,
-		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:      time.Now().Unix(),
-		Enc:      r2ps.EncDevice,
-		Data:     encData,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
+		Data: buildTFAData(t, &r2ps.TFARequestData{
+			TFAMode: r2ps.TFAModeOPAQUE,
+			State:   r2ps.StateEvaluate,
+			Request: base64.URLEncoding.EncodeToString(regReq.Serialize()),
+		}),
 		ClientID: clientID,
-		Kid:      kid,
-		Context:  "test",
-		Type:     r2ps.TypePINRegistration,
+		Context:  ctxName,
+		Type:     r2ps.Type2FARegistration,
 	})
 
 	respBytes, err := d.Process(ctx, body)
@@ -322,18 +306,14 @@ func TestFullProtocolFlow(t *testing.T) {
 	if err := json.Unmarshal(respPayload, &svcResp); err != nil {
 		t.Fatalf("unmarshal resp: %v", err)
 	}
-	respData, err := icrypto.DecryptJWE(svcResp.Data, key)
-	if err != nil {
-		t.Fatalf("decrypt resp: %v", err)
-	}
-	var pakeResp r2ps.PAKEResponse
-	if err := json.Unmarshal(respData, &pakeResp); err != nil {
-		t.Fatalf("unmarshal PAKE resp: %v", err)
+	var tfaResp r2ps.TFAResponseData
+	if err := json.Unmarshal(svcResp.Data, &tfaResp); err != nil {
+		t.Fatalf("unmarshal TFA resp: %v", err)
 	}
 
 	// Client finalize registration
 	deser, _ := pake.OPAQUEConfig.Deserializer()
-	regRespBytes, _ := base64.URLEncoding.DecodeString(pakeResp.Resp)
+	regRespBytes, _ := base64.URLEncoding.DecodeString(tfaResp.Response)
 	regResp, err := deser.RegistrationResponse(regRespBytes)
 	if err != nil {
 		t.Fatalf("deser reg resp: %v", err)
@@ -345,24 +325,18 @@ func TestFullProtocolFlow(t *testing.T) {
 	}
 
 	// --- Registration finalize ---
-	pakeReqFin := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateFinalize,
-		Req:      base64.URLEncoding.EncodeToString(record.Serialize()),
-	}
-	pakeFinJSON, _ := json.Marshal(pakeReqFin)
-	encDataFin, _ := icrypto.EncryptJWE(pakeFinJSON, &key.PublicKey)
-
 	body = buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:      r2ps.ProtocolVersion,
-		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:      time.Now().Unix(),
-		Enc:      r2ps.EncDevice,
-		Data:     encDataFin,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
+		Data: buildTFAData(t, &r2ps.TFARequestData{
+			TFAMode: r2ps.TFAModeOPAQUE,
+			State:   r2ps.StateFinalize,
+			Request: base64.URLEncoding.EncodeToString(record.Serialize()),
+		}),
 		ClientID: clientID,
-		Kid:      kid,
-		Context:  "test",
-		Type:     r2ps.TypePINRegistration,
+		Context:  ctxName,
+		Type:     r2ps.Type2FARegistration,
 	})
 
 	respBytes, err = d.Process(ctx, body)
@@ -377,25 +351,18 @@ func TestFullProtocolFlow(t *testing.T) {
 		t.Fatalf("KE1: %v", err)
 	}
 
-	pakeAuthReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Task:     "sign",
-		Req:      base64.URLEncoding.EncodeToString(ke1.Serialize()),
-	}
-	pakeAuthJSON, _ := json.Marshal(pakeAuthReq)
-	encDataAuth, _ := icrypto.EncryptJWE(pakeAuthJSON, &key.PublicKey)
-
 	body = buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:      r2ps.ProtocolVersion,
-		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:      time.Now().Unix(),
-		Enc:      r2ps.EncDevice,
-		Data:     encDataAuth,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
+		Data: buildTFAData(t, &r2ps.TFARequestData{
+			TFAMode: r2ps.TFAModeOPAQUE,
+			State:   r2ps.StateEvaluate,
+			Request: base64.URLEncoding.EncodeToString(ke1.Serialize()),
+		}),
 		ClientID: clientID,
-		Kid:      kid,
-		Context:  "test",
-		Type:     r2ps.TypeAuthenticate,
+		Context:  ctxName,
+		Type:     r2ps.Type2FAAuthenticate,
 	})
 
 	respBytes, err = d.Process(ctx, body)
@@ -406,46 +373,40 @@ func TestFullProtocolFlow(t *testing.T) {
 	// Parse auth evaluate response
 	respPayload, _ = icrypto.VerifyJWS(string(respBytes), &key.PublicKey)
 	json.Unmarshal(respPayload, &svcResp)
-	respData, _ = icrypto.DecryptJWE(svcResp.Data, key)
-	json.Unmarshal(respData, &pakeResp)
+	var tfaAuthResp r2ps.TFAAuthResponseData
+	json.Unmarshal(svcResp.Data, &tfaAuthResp)
 
-	sessionID := pakeResp.PakeSessionID
+	sessionID := tfaAuthResp.TFASessionID
 	if sessionID == "" {
 		t.Fatal("no session ID returned")
 	}
 
 	// Client processes KE2
-	ke2Bytes, _ := base64.URLEncoding.DecodeString(pakeResp.Resp)
+	ke2Bytes, _ := base64.URLEncoding.DecodeString(tfaAuthResp.Response)
 	ke2, err := deser.KE2(ke2Bytes)
 	if err != nil {
 		t.Fatalf("deser KE2: %v", err)
 	}
 
-	ke3, sessionKey, _, err := authClient.GenerateKE3(ke2, nil, nil)
+	ke3, _, _, err := authClient.GenerateKE3(ke2, nil, nil)
 	if err != nil {
 		t.Fatalf("KE3: %v", err)
 	}
 
 	// --- Authentication finalize ---
-	pakeFinAuth := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateFinalize,
-		Req:      base64.URLEncoding.EncodeToString(ke3.Serialize()),
-	}
-	pakeFinAuthJSON, _ := json.Marshal(pakeFinAuth)
-	encDataFinAuth, _ := icrypto.EncryptJWE(pakeFinAuthJSON, &key.PublicKey)
-
 	body = buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:           time.Now().Unix(),
-		Enc:           r2ps.EncDevice,
-		Data:          encDataFinAuth,
-		ClientID:      clientID,
-		Kid:           kid,
-		Context:       "test",
-		Type:          r2ps.TypeAuthenticate,
-		PakeSessionID: sessionID,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
+		Data: buildTFAData(t, &r2ps.TFARequestData{
+			TFAMode: r2ps.TFAModeOPAQUE,
+			State:   r2ps.StateFinalize,
+			Request: base64.URLEncoding.EncodeToString(ke3.Serialize()),
+		}),
+		ClientID:     clientID,
+		Context:      ctxName,
+		Type:         r2ps.Type2FAAuthenticate,
+		TFASessionID: sessionID,
 	})
 
 	respBytes, err = d.Process(ctx, body)
@@ -454,20 +415,15 @@ func TestFullProtocolFlow(t *testing.T) {
 	}
 
 	// --- Service request: keygen ---
-	keygenReq, _ := json.Marshal(map[string]string{"curve": "P-256"})
-	encSvcData, _ := icrypto.EncryptJWESymmetric(keygenReq, sessionKey[:32])
-
 	body = buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:           time.Now().Unix(),
-		Enc:           r2ps.EncUser,
-		Data:          encSvcData,
-		ClientID:      clientID,
-		Kid:           kid,
-		Context:       "test",
-		Type:          r2ps.TypeHSMECKeygen,
-		PakeSessionID: sessionID,
+		Ver:          r2ps.ProtocolVersion,
+		Nonce:        base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:          time.Now().Unix(),
+		Data:         json.RawMessage(`{"curve":"P-256"}`),
+		ClientID:     clientID,
+		Context:      ctxName,
+		Type:         r2ps.TypeP256Generate,
+		TFASessionID: sessionID,
 	})
 
 	respBytes, err = d.Process(ctx, body)
@@ -478,16 +434,9 @@ func TestFullProtocolFlow(t *testing.T) {
 	// Parse keygen response
 	respPayload, _ = icrypto.VerifyJWS(string(respBytes), &key.PublicKey)
 	json.Unmarshal(respPayload, &svcResp)
-	if svcResp.Enc != r2ps.EncUser {
-		t.Errorf("resp enc = %q, want user", svcResp.Enc)
-	}
-	svcRespData, err := icrypto.DecryptJWESymmetric(svcResp.Data, sessionKey[:32])
-	if err != nil {
-		t.Fatalf("decrypt svc resp: %v", err)
-	}
 
 	var keygenResp map[string]string
-	if err := json.Unmarshal(svcRespData, &keygenResp); err != nil {
+	if err := json.Unmarshal(svcResp.Data, &keygenResp); err != nil {
 		t.Fatalf("unmarshal keygen resp: %v", err)
 	}
 	if keygenResp["created_key"] == "" {
@@ -495,29 +444,23 @@ func TestFullProtocolFlow(t *testing.T) {
 	}
 }
 
-// --- PAKE error cases ---
+// --- 2FA error cases ---
 
-func TestPAKEUnsupportedProtocol(t *testing.T) {
+func TestTFAUnsupportedMode(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 
-	pakeReq := r2ps.PAKERequest{
-		Protocol: "scram",
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      base64.URLEncoding.EncodeToString([]byte("data")),
-	}
-	pakeJSON, _ := json.Marshal(pakeReq)
-	encData, _ := icrypto.EncryptJWE(pakeJSON, &key.PublicKey)
-
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:      r2ps.ProtocolVersion,
-		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:      time.Now().Unix(),
-		Enc:      r2ps.EncDevice,
-		Data:     encData,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
+		Data: buildTFAData(t, &r2ps.TFARequestData{
+			TFAMode: "scram",
+			State:   r2ps.StateEvaluate,
+			Request: base64.URLEncoding.EncodeToString([]byte("data")),
+		}),
 		ClientID: "c1",
-		Kid:      "k1",
 		Context:  "ctx",
-		Type:     r2ps.TypePINRegistration,
+		Type:     r2ps.Type2FARegistration,
 	})
 
 	_, err := d.Process(context.Background(), body)
@@ -527,27 +470,21 @@ func TestPAKEUnsupportedProtocol(t *testing.T) {
 	}
 }
 
-func TestPAKEInvalidStateCombo(t *testing.T) {
+func TestTFAInvalidStateCombo(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    "unknown_state",
-		Req:      base64.URLEncoding.EncodeToString([]byte("data")),
-	}
-	pakeJSON, _ := json.Marshal(pakeReq)
-	encData, _ := icrypto.EncryptJWE(pakeJSON, &key.PublicKey)
-
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:      r2ps.ProtocolVersion,
-		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:      time.Now().Unix(),
-		Enc:      r2ps.EncDevice,
-		Data:     encData,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
+		Data: buildTFAData(t, &r2ps.TFARequestData{
+			TFAMode: r2ps.TFAModeOPAQUE,
+			State:   "unknown_state",
+			Request: base64.URLEncoding.EncodeToString([]byte("data")),
+		}),
 		ClientID: "c1",
-		Kid:      "k1",
 		Context:  "ctx",
-		Type:     r2ps.TypePINRegistration,
+		Type:     r2ps.Type2FARegistration,
 	})
 
 	_, err := d.Process(context.Background(), body)
@@ -562,24 +499,19 @@ func TestAuthEvaluateUnknownClient(t *testing.T) {
 
 	client, _ := pake.OPAQUEConfig.Client()
 	ke1, _ := client.GenerateKE1([]byte("pin"))
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      base64.URLEncoding.EncodeToString(ke1.Serialize()),
-	}
-	pakeJSON, _ := json.Marshal(pakeReq)
-	encData, _ := icrypto.EncryptJWE(pakeJSON, &key.PublicKey)
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:      r2ps.ProtocolVersion,
-		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:      time.Now().Unix(),
-		Enc:      r2ps.EncDevice,
-		Data:     encData,
+		Ver:   r2ps.ProtocolVersion,
+		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
+		Iat:   time.Now().Unix(),
+		Data: buildTFAData(t, &r2ps.TFARequestData{
+			TFAMode: r2ps.TFAModeOPAQUE,
+			State:   r2ps.StateEvaluate,
+			Request: base64.URLEncoding.EncodeToString(ke1.Serialize()),
+		}),
 		ClientID: "unknown-client",
-		Kid:      "unknown-key",
 		Context:  "ctx",
-		Type:     r2ps.TypeAuthenticate,
+		Type:     r2ps.Type2FAAuthenticate,
 	})
 
 	// With fake records, evaluate should succeed (returns KE2)
@@ -600,128 +532,20 @@ func TestR2PSErrorString(t *testing.T) {
 	}
 }
 
-func TestDecryptRequestDataUnsupportedEnc(t *testing.T) {
-	d, _, _ := setupDispatcher(t)
-	_, err := d.decryptRequestData(&r2ps.ServiceRequest{Enc: "invalid"})
-	if err == nil {
-		t.Fatal("expected error for unsupported enc mode")
-	}
-}
-
 func TestProcessIatValidation(t *testing.T) {
 	d, key, _ := setupDispatcher(t)
 
 	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
 		Ver:   r2ps.ProtocolVersion,
 		Nonce: base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:   time.Now().Add(-10 * time.Minute).Unix(), // 10 min in the past
-		Type:  r2ps.TypeHSMECKeygen,
-		Enc:   r2ps.EncUser,
+		Iat:   time.Now().Add(-10 * time.Minute).Unix(),
+		Type:  r2ps.TypeP256Generate,
+		Data:  json.RawMessage(`{"curve":"P-256"}`),
 	})
 
 	_, err := d.Process(context.Background(), body)
 	r2psErr := err.(*R2PSError)
 	if r2psErr.Code != r2ps.ErrIllegalRequestData {
 		t.Errorf("code = %q, want ILLEGAL_REQUEST_DATA", r2psErr.Code)
-	}
-}
-
-func TestPINChangeRequiresUserEnc(t *testing.T) {
-	d, key, _ := setupDispatcher(t)
-
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      base64.URLEncoding.EncodeToString([]byte("data")),
-	}
-	pakeJSON, _ := json.Marshal(pakeReq)
-	encData, _ := icrypto.EncryptJWE(pakeJSON, &key.PublicKey)
-
-	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:      r2ps.ProtocolVersion,
-		Nonce:    base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:      time.Now().Unix(),
-		Enc:      r2ps.EncDevice,
-		Data:     encData,
-		ClientID: "c1",
-		Kid:      "k1",
-		Context:  "ctx",
-		Type:     r2ps.TypePINChange,
-	})
-
-	_, err := d.Process(context.Background(), body)
-	r2psErr := err.(*R2PSError)
-	if r2psErr.Code != r2ps.ErrIllegalRequestData {
-		t.Errorf("code = %q, want ILLEGAL_REQUEST_DATA", r2psErr.Code)
-	}
-}
-
-func TestPINChangeRequiresSession(t *testing.T) {
-	d, key, _ := setupDispatcher(t)
-
-	pakeReq := r2ps.PAKERequest{
-		Protocol: r2ps.PAKEProtocolOPAQUE,
-		State:    r2ps.PAKEStateEvaluate,
-		Req:      base64.URLEncoding.EncodeToString([]byte("data")),
-	}
-	pakeJSON, _ := json.Marshal(pakeReq)
-	encData, _ := icrypto.EncryptJWESymmetric(pakeJSON, icrypto.RandomBytes(32))
-
-	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:           time.Now().Unix(),
-		Enc:           r2ps.EncUser,
-		Data:          encData,
-		ClientID:      "c1",
-		Kid:           "k1",
-		Context:       "ctx",
-		Type:          r2ps.TypePINChange,
-		PakeSessionID: "nonexistent",
-	})
-
-	_, err := d.Process(context.Background(), body)
-	r2psErr := err.(*R2PSError)
-	if r2psErr.Code != r2ps.ErrUnauthorized {
-		t.Errorf("code = %q, want UNAUTHORIZED", r2psErr.Code)
-	}
-}
-
-func TestServiceSessionContextMismatch(t *testing.T) {
-	d, key, _ := setupDispatcher(t)
-
-	// Create a verified session with context "ctx-A"
-	sessionKey := icrypto.RandomBytes(32)
-	sess := &pake.Session{
-		ID:         "test-session",
-		ClientID:   "c1",
-		Kid:        "k1",
-		Context:    "ctx-A",
-		SessionKey: sessionKey,
-		ExpiresAt:  time.Now().Add(5 * time.Minute),
-		Verified:   true,
-	}
-	d.sessions.Create(sess)
-
-	svcReq, _ := json.Marshal(map[string]string{"curve": "P-256"})
-	encData, _ := icrypto.EncryptJWESymmetric(svcReq, sessionKey[:32])
-
-	body := buildSignedRequest(t, key, &r2ps.ServiceRequest{
-		Ver:           r2ps.ProtocolVersion,
-		Nonce:         base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
-		Iat:           time.Now().Unix(),
-		Enc:           r2ps.EncUser,
-		Data:          encData,
-		ClientID:      "c1",
-		Kid:           "k1",
-		Context:       "ctx-B", // different from session context
-		Type:          r2ps.TypeHSMECKeygen,
-		PakeSessionID: "test-session",
-	})
-
-	_, err := d.Process(context.Background(), body)
-	r2psErr := err.(*R2PSError)
-	if r2psErr.Code != r2ps.ErrAccessDenied {
-		t.Errorf("code = %q, want ACCESS_DENIED", r2psErr.Code)
 	}
 }
