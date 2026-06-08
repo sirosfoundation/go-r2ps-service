@@ -165,6 +165,28 @@ type WIAResponse struct {
 	WIA string `json:"wia"`
 }
 
+// WIRevokeRequest is the data payload for eudiw_wi_revoke.
+type WIRevokeRequest struct {
+	Reason string `json:"reason,omitempty"` // e.g. "lost", "stolen", "compromised"
+}
+
+// WIRevokeResponse is the data payload returned by eudiw_wi_revoke.
+type WIRevokeResponse struct {
+	RevokedIndices int    `json:"revoked_indices"`
+	Message        string `json:"message"`
+}
+
+// WISuspendRequest is the data payload for eudiw_wi_suspend.
+type WISuspendRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// WISuspendResponse is the data payload returned by eudiw_wi_suspend.
+type WISuspendResponse struct {
+	SuspendedIndices int    `json:"suspended_indices"`
+	Message          string `json:"message"`
+}
+
 // JWS typ header values — r2ps-service-types.md §2.1
 const (
 	TypRequest  = "r2ps-request+jwt"

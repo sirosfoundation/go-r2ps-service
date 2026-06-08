@@ -21,10 +21,13 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sirosfoundation/go-r2ps-service/internal/audit"
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
 	"github.com/sirosfoundation/go-r2ps-service/internal/pake"
 	"github.com/sirosfoundation/go-r2ps-service/internal/service"
+	"github.com/sirosfoundation/go-r2ps-service/internal/statuslist"
+	"github.com/sirosfoundation/go-r2ps-service/internal/store"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
 
@@ -88,11 +91,17 @@ func main() {
 		service.NewListKeysHandler(hsmBackend),
 	}
 
+	// Lifecycle store and audit logger.
+	lifecycleStore := store.NewMemoryStore()
+	auditLogger := audit.New(slog.Default())
+
 	// EUDIW Wallet Provider attestation handlers (WKA/WIA).
-	wpCfg := walletProviderConfig(serverKey)
+	wpCfg := walletProviderConfig(serverKey, lifecycleStore, auditLogger)
 	handlers = append(handlers,
 		service.NewWKAHandler(hsmBackend, wpCfg),
 		service.NewWIAHandler(hsmBackend, wpCfg),
+		service.NewWIRevokeHandler(wpCfg),
+		service.NewWISuspendHandler(wpCfg),
 	)
 
 	maxAttempts := envInt("R2PS_MAX_ATTEMPTS", 5)
@@ -130,6 +139,14 @@ func main() {
 
 	// R2PS protocol endpoint
 	mux.HandleFunc("POST /r2ps", r2psHandler(dispatcher, hsmTimeout))
+
+	// Token Status List endpoint (RFC 9701 / CS-04 §7.2)
+	statusListHandler := statuslist.NewHandler(lifecycleStore, &statuslist.Config{
+		SigningKey: serverKey,
+		X5CChain:  wpCfg.X5CChain,
+		BaseURI:   wpCfg.StatusListBaseURI,
+	})
+	mux.Handle("GET /statuslists/", statusListHandler)
 
 	srv := &http.Server{
 		Addr:              listen,
@@ -363,20 +380,34 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 // walletProviderConfig builds the WalletProviderConfig from environment variables.
 // In production, the signing key and x5c chain would come from a secure store;
 // here we use the server key as a stand-in.
-func walletProviderConfig(serverKey *ecdsa.PrivateKey) *service.WalletProviderConfig {
+func walletProviderConfig(serverKey *ecdsa.PrivateKey, s store.Store, al *audit.Logger) *service.WalletProviderConfig {
+	// Load x5c certificate chain if configured.
+	var x5c [][]byte
+	if x5cPath := os.Getenv("R2PS_WP_X5C_PATH"); x5cPath != "" {
+		var err error
+		x5c, err = service.LoadX5CChain(x5cPath)
+		if err != nil {
+			slog.Warn("failed to load x5c chain", "path", x5cPath, "error", err)
+		} else {
+			slog.Info("loaded x5c certificate chain", "path", x5cPath, "certs", len(x5c))
+		}
+	}
+
 	return &service.WalletProviderConfig{
-		SigningKey:         serverKey,
-		X5CChain:          nil, // TODO: load x5c chain from R2PS_WP_X5C_PATH
-		WalletLink:        envOr("R2PS_WP_WALLET_LINK", ""),
-		WalletName:        envOr("R2PS_WP_WALLET_NAME", "SIROS EUDI Wallet"),
-		WalletVersion:     envOr("R2PS_WP_WALLET_VERSION", "0.1.0"),
+		SigningKey:                      serverKey,
+		X5CChain:                        x5c,
+		WalletLink:                      envOr("R2PS_WP_WALLET_LINK", ""),
+		WalletName:                      envOr("R2PS_WP_WALLET_NAME", "SIROS EUDI Wallet"),
+		WalletVersion:                   envOr("R2PS_WP_WALLET_VERSION", "0.1.0"),
 		WalletSolutionCertificationInfo: envOr("R2PS_WP_CERT_INFO", ""),
-		KeyStorageLevel:   []string{envOr("R2PS_WP_KEY_STORAGE_LEVEL", "iso_18045_high")},
-		UserAuthLevel:     []string{envOr("R2PS_WP_USER_AUTH_LEVEL", "iso_18045_high")},
-		Certification:     envOr("R2PS_WP_CERTIFICATION", ""),
-		StatusListBaseURI: envOr("R2PS_WP_STATUS_LIST_BASE", "https://wp.example.com/statuslists"),
-		WKATTL:            envDuration("R2PS_WP_WKA_TTL", 24*time.Hour),
-		WIATTL:            envDuration("R2PS_WP_WIA_TTL", 12*time.Hour),
-		StatusMaintenancePeriod: envDuration("R2PS_WP_STATUS_MAINT", 31*24*time.Hour),
+		KeyStorageLevel:                 []string{envOr("R2PS_WP_KEY_STORAGE_LEVEL", "iso_18045_high")},
+		UserAuthLevel:                   []string{envOr("R2PS_WP_USER_AUTH_LEVEL", "iso_18045_high")},
+		Certification:                   envOr("R2PS_WP_CERTIFICATION", ""),
+		StatusListBaseURI:               envOr("R2PS_WP_STATUS_LIST_BASE", "https://wp.example.com/statuslists"),
+		WKATTL:                          envDuration("R2PS_WP_WKA_TTL", 24*time.Hour),
+		WIATTL:                          envDuration("R2PS_WP_WIA_TTL", 12*time.Hour),
+		StatusMaintenancePeriod:         envDuration("R2PS_WP_STATUS_MAINT", 31*24*time.Hour),
+		Store:                           s,
+		Audit:                           al,
 	}
 }

@@ -14,10 +14,14 @@
 
 R2PS (Remote PAKE-Protected Services) server implementation in Go.
 
-Implements the R2PS protocol for secure remote HSM key operations with OPAQUE
-(RFC 9807) authentication and end-to-end JWE encryption. All cryptographic key
-operations are performed via PKCS#11 (SoftHSM2 for development, hardware HSM
-for production).
+Implements the R2PS protocol for secure remote cryptographic operations with
+OPAQUE (RFC 9807) authentication and JWS-signed request/response envelopes.
+All cryptographic key operations are performed via PKCS#11 (SoftHSM2 for
+development, hardware HSM for production).
+
+The server acts as both a **WSCD backend** (remote key generation, ECDSA
+signing, ECDH agreement via PKCS#11) and a **WSCA** (Wallet Key Attestation
+and Wallet Instance Attestation issuance per ETSI TS 119 476-3 / CS-04).
 
 ## Specification
 
@@ -37,15 +41,32 @@ The authoritative R2PS protocol specifications are maintained in
 ```
 cmd/server/          HTTP server entry point
 internal/
-  crypto/            JWS signing/verification, JWE encryption, ECDH
+  crypto/            JWS signing/verification, ECDH
   hsm/               PKCS#11 backend (key generation, ECDSA, ECDH)
   pake/              OPAQUE server (registration, authentication, sessions)
-  service/           Request dispatcher, HSM service handlers
+  service/           Request dispatcher, HSM + EUDIW service handlers
 pkg/
   client/            R2PS client library (register, authenticate, call service)
   r2ps/              Protocol types and constants
 test/integration/    End-to-end tests (SoftHSM2)
 ```
+
+## Implemented Service Types
+
+| Identifier | Purpose | Mode | WSCD/WSCA role |
+|---|---|---|---|
+| `2fa_registration` | Establish OPAQUE credential | 1FA | — |
+| `2fa_authenticate` | Verify OPAQUE and open session | 1FA | — |
+| `2fa_change` | Replace OPAQUE credential | 2FA | — |
+| `p256_generate` | Generate P-256 key in HSM | 1FA | WSCD |
+| `sign_ecdsa` | ECDSA sign with HSM key | 2FA | WSCD |
+| `agree_ecdh` | ECDH agreement with HSM key | 2FA | WSCD |
+| `hsm_list_keys` | List keys in HSM | 2FA | WSCD |
+| `eudiw_wka_etsi` | Issue Wallet Key Attestation | 1FA | WSCA |
+| `eudiw_wia_etsi` | Issue Wallet Instance Attestation | 1FA | WSCA |
+
+See the [service type registry](docs/specs/r2ps-service-types-register.md) for
+the full list including planned types.
 
 ## Dependencies
 
@@ -71,12 +92,34 @@ docker compose up
 
 ### Environment Variables
 
+#### HSM / PKCS#11
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `R2PS_HSM_MODULE` | `/usr/lib/softhsm/libsofthsm2.so` | PKCS#11 module path |
 | `R2PS_HSM_TOKEN_LABEL` | `r2ps` | HSM token label |
 | `R2PS_HSM_PIN` | (required) | HSM user PIN |
 | `R2PS_HSM_SLOT` | (auto) | Slot number (optional, finds by label) |
+
+#### Wallet Provider (WSCA)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `R2PS_WP_WALLET_NAME` | `SIROS EUDI Wallet` | `wallet_name` in WIA |
+| `R2PS_WP_WALLET_VERSION` | `1.0.0` | `wallet_version` in WIA |
+| `R2PS_WP_WALLET_LINK` | (empty) | `wallet_link` in WIA/WKA |
+| `R2PS_WP_STATUS_LIST_BASE` | `https://wp.example.com/statuslists` | Base URI for status lists |
+| `R2PS_WP_WKA_TTL` | `24h` | WKA time-to-live |
+| `R2PS_WP_WIA_TTL` | `12h` | WIA time-to-live (MUST < 24h per CS-04) |
+| `R2PS_WP_STATUS_MAINT` | `744h` (31d) | Status maintenance period |
+
+#### Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `R2PS_MAX_ATTEMPTS` | `5` | Max failed auth attempts before lockout |
+| `R2PS_LOCKOUT_DURATION` | `15m` | Lockout duration after max attempts |
+| `R2PS_SESSION_TTL` | `5m` | 2FA session time-to-live |
 
 ## Architecture
 

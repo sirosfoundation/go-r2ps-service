@@ -5,9 +5,10 @@
 | `2fa_change`       | Replaces an existing second factor              | `2FA`  | Completed |
 | `eudiw_wka_etsi`   | Issuance of an ETSI Wallet Key Attestation      | `1FA`  | Completed |
 | `eudiw_wia_etsi`   | Issuance of an ETSI Wallet Instance Attestation | `1FA`  | Completed |
-| `eudiw_wi_revoke`  | Client triggered revocation of wallet instance  | `1FA`  | TODO      |
-| `eudiw_wi_suspend` | Client triggered suspension of EUDIW instance   | `1FA`  | TODO      |
+| `eudiw_wi_revoke`  | Client triggered revocation of wallet instance  | `1FA`  | Completed |
+| `eudiw_wi_suspend` | Client triggered suspension of EUDIW instance   | `1FA`  | Completed |
 | `eudiw_wi_add`     | Client adds new EUDIW instance to their account | `1FA`  | TODO      |
-| `p256_generate`    | Generates a P-256 key at security context `hsm` | `1FA`  | TODO      |
-| `sign_ecdsa`       | Creates a raw ECDSA at security context `hsm`   | `2FA`  | TODO      |
-| `agree_ecdh`       | Performs ECDH at security context `hsm`         | `2FA`  | TODO      |
+| `p256_generate`    | Generates a P-256 key at security context `hsm` | `1FA`  | Completed |
+| `sign_ecdsa`       | Creates a raw ECDSA at security context `hsm`   | `2FA`  | Completed |
+| `agree_ecdh`       | Performs ECDH at security context `hsm`          | `2FA`  | Completed |
+| `hsm_list_keys`    | Lists keys at security context `hsm`            | `2FA`  | Completed |

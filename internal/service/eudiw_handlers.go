@@ -6,12 +6,16 @@ import (
 	"crypto/elliptic"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
-	"sync/atomic"
+	"log/slog"
+	"os"
 	"time"
 
+	"github.com/sirosfoundation/go-r2ps-service/internal/audit"
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
+	"github.com/sirosfoundation/go-r2ps-service/internal/store"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
 
@@ -45,16 +49,12 @@ type WalletProviderConfig struct {
 	// StatusMaintenancePeriod is the minimum client_status.exp / key_storage_status.exp
 	// ahead of presentation time. CS-04 §7.2: at least 31 days.
 	StatusMaintenancePeriod time.Duration
+	// Store provides persistent status list index allocation and status tracking.
+	// If nil, a no-op default is used (status indices start at 0, no persistence).
+	Store store.Store
+	// Audit is the audit logger. If nil, audit events are not emitted.
+	Audit *audit.Logger
 }
-
-// statusIndexAllocator is a simple thread-safe counter for allocating
-// status list indices. Production would use a persistent store.
-type statusIndexAllocator struct {
-	wkaNext atomic.Int64
-	wiaNext atomic.Int64
-}
-
-var statusAlloc statusIndexAllocator
 
 // --- WKA Handler ---
 
@@ -110,7 +110,13 @@ func (h *WKAHandler) Handle(ctx context.Context, clientID string, reqData []byte
 		statusMaint = 31 * 24 * time.Hour // CS-04 §7.2: at least 31 days
 	}
 
-	idx := int(statusAlloc.wkaNext.Add(1) - 1)
+	idx, err := h.cfg.Store.AllocateIndex("ka")
+	if err != nil {
+		return nil, fmt.Errorf("allocate status index: %w", err)
+	}
+	if err := h.cfg.Store.RecordWUA(clientID, "ka", idx); err != nil {
+		return nil, fmt.Errorf("record WUA: %w", err)
+	}
 
 	payload := r2ps.WKAPayload{
 		Iat:                now.Unix(),
@@ -142,6 +148,11 @@ func (h *WKAHandler) Handle(ctx context.Context, clientID string, reqData []byte
 	}
 
 	resp := r2ps.WKAResponse{WKA: jwt}
+	if h.cfg.Audit != nil {
+		h.cfg.Audit.Log(audit.EventWKAIssued, clientID, "wua",
+			slog.Int("status_idx", idx),
+			slog.Int("attested_keys", len(attestedKeys)))
+	}
 	return json.Marshal(resp)
 }
 
@@ -207,7 +218,13 @@ func (h *WIAHandler) Handle(ctx context.Context, clientID string, reqData []byte
 		statusMaint = 31 * 24 * time.Hour
 	}
 
-	idx := int(statusAlloc.wiaNext.Add(1) - 1)
+	idx, err := h.cfg.Store.AllocateIndex("wia")
+	if err != nil {
+		return nil, fmt.Errorf("allocate status index: %w", err)
+	}
+	if err := h.cfg.Store.RecordWUA(clientID, "wia", idx); err != nil {
+		return nil, fmt.Errorf("record WUA: %w", err)
+	}
 
 	payload := r2ps.WIAPayload{
 		Iat:                                    now.Unix(),
@@ -240,6 +257,10 @@ func (h *WIAHandler) Handle(ctx context.Context, clientID string, reqData []byte
 	}
 
 	resp := r2ps.WIAResponse{WIA: jwt}
+	if h.cfg.Audit != nil {
+		h.cfg.Audit.Log(audit.EventWIAIssued, clientID, "wua",
+			slog.Int("status_idx", idx))
+	}
 	return json.Marshal(resp)
 }
 
@@ -315,4 +336,139 @@ func pubKeyToJWK(ecPoint []byte, curve string) (json.RawMessage, error) {
 	)
 
 	return json.RawMessage(jwkJSON), nil
+}
+
+// --- WI Revoke Handler ---
+
+// WIRevokeHandler revokes all status list entries for a wallet instance.
+// CS-04 §7.2 req 8-9: on revocation, revoke all client_status entries.
+type WIRevokeHandler struct {
+	cfg *WalletProviderConfig
+}
+
+func NewWIRevokeHandler(cfg *WalletProviderConfig) *WIRevokeHandler {
+	return &WIRevokeHandler{cfg: cfg}
+}
+
+func (h *WIRevokeHandler) Type() string { return r2ps.TypeEUDIWWIRevoke }
+
+func (h *WIRevokeHandler) Handle(_ context.Context, clientID string, reqData []byte) ([]byte, error) {
+	var req r2ps.WIRevokeRequest
+	if err := json.Unmarshal(reqData, &req); err != nil {
+		return nil, fmt.Errorf("parse revoke request: %w", err)
+	}
+
+	count, err := h.revokeAll(clientID, store.StatusInvalid)
+	if err != nil {
+		return nil, fmt.Errorf("revoke wallet instance: %w", err)
+	}
+
+	if h.cfg.Audit != nil {
+		h.cfg.Audit.Log(audit.EventWIRevoked, clientID, "wua",
+			slog.String("reason", req.Reason),
+			slog.Int("revoked_indices", count))
+	}
+
+	resp := r2ps.WIRevokeResponse{
+		RevokedIndices: count,
+		Message:        "wallet instance revoked",
+	}
+	return json.Marshal(resp)
+}
+
+func (h *WIRevokeHandler) revokeAll(clientID string, status byte) (int, error) {
+	count := 0
+	for _, cat := range []string{"ka", "wia"} {
+		indices, err := h.cfg.Store.GetClientIndices(clientID, cat)
+		if err != nil {
+			return count, fmt.Errorf("get indices for %s: %w", cat, err)
+		}
+		for _, idx := range indices {
+			if err := h.cfg.Store.SetStatus(cat, idx, status); err != nil {
+				slog.Warn("failed to set status", "category", cat, "idx", idx, "error", err)
+				continue
+			}
+			count++
+		}
+	}
+	return count, nil
+}
+
+// --- WI Suspend Handler ---
+
+// WISuspendHandler suspends all status list entries for a wallet instance.
+type WISuspendHandler struct {
+	cfg *WalletProviderConfig
+}
+
+func NewWISuspendHandler(cfg *WalletProviderConfig) *WISuspendHandler {
+	return &WISuspendHandler{cfg: cfg}
+}
+
+func (h *WISuspendHandler) Type() string { return r2ps.TypeEUDIWWISuspend }
+
+func (h *WISuspendHandler) Handle(_ context.Context, clientID string, reqData []byte) ([]byte, error) {
+	var req r2ps.WISuspendRequest
+	if err := json.Unmarshal(reqData, &req); err != nil {
+		return nil, fmt.Errorf("parse suspend request: %w", err)
+	}
+
+	count := 0
+	for _, cat := range []string{"ka", "wia"} {
+		indices, err := h.cfg.Store.GetClientIndices(clientID, cat)
+		if err != nil {
+			return nil, fmt.Errorf("get indices for %s: %w", cat, err)
+		}
+		for _, idx := range indices {
+			if err := h.cfg.Store.SetStatus(cat, idx, store.StatusSuspended); err != nil {
+				slog.Warn("failed to suspend", "category", cat, "idx", idx, "error", err)
+				continue
+			}
+			count++
+		}
+	}
+
+	if h.cfg.Audit != nil {
+		h.cfg.Audit.Log(audit.EventWISuspended, clientID, "wua",
+			slog.String("reason", req.Reason),
+			slog.Int("suspended_indices", count))
+	}
+
+	resp := r2ps.WISuspendResponse{
+		SuspendedIndices: count,
+		Message:          "wallet instance suspended",
+	}
+	return json.Marshal(resp)
+}
+
+// --- x5c certificate chain loading ---
+
+// LoadX5CChain reads a PEM file containing one or more certificates
+// and returns them as DER-encoded byte slices (leaf first).
+func LoadX5CChain(path string) ([][]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read x5c file: %w", err)
+	}
+
+	var chain [][]byte
+	rest := data
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			chain = append(chain, block.Bytes)
+		}
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("no certificates found in PEM file %s", path)
+	}
+	return chain, nil
 }
