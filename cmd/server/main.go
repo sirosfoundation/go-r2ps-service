@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/tls"
 	"encoding/json"
@@ -86,6 +87,13 @@ func main() {
 		service.NewECDHHandler(hsmBackend),
 		service.NewListKeysHandler(hsmBackend),
 	}
+
+	// EUDIW Wallet Provider attestation handlers (WKA/WIA).
+	wpCfg := walletProviderConfig(serverKey)
+	handlers = append(handlers,
+		service.NewWKAHandler(hsmBackend, wpCfg),
+		service.NewWIAHandler(hsmBackend, wpCfg),
+	)
 
 	maxAttempts := envInt("R2PS_MAX_ATTEMPTS", 5)
 	lockoutDur := envDuration("R2PS_LOCKOUT_DURATION", 15*time.Minute)
@@ -350,4 +358,25 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		}
 	}
 	return fallback
+}
+
+// walletProviderConfig builds the WalletProviderConfig from environment variables.
+// In production, the signing key and x5c chain would come from a secure store;
+// here we use the server key as a stand-in.
+func walletProviderConfig(serverKey *ecdsa.PrivateKey) *service.WalletProviderConfig {
+	return &service.WalletProviderConfig{
+		SigningKey:         serverKey,
+		X5CChain:          nil, // TODO: load x5c chain from R2PS_WP_X5C_PATH
+		WalletLink:        envOr("R2PS_WP_WALLET_LINK", ""),
+		WalletName:        envOr("R2PS_WP_WALLET_NAME", "SIROS EUDI Wallet"),
+		WalletVersion:     envOr("R2PS_WP_WALLET_VERSION", "0.1.0"),
+		WalletSolutionCertificationInfo: envOr("R2PS_WP_CERT_INFO", ""),
+		KeyStorageLevel:   []string{envOr("R2PS_WP_KEY_STORAGE_LEVEL", "iso_18045_high")},
+		UserAuthLevel:     []string{envOr("R2PS_WP_USER_AUTH_LEVEL", "iso_18045_high")},
+		Certification:     envOr("R2PS_WP_CERTIFICATION", ""),
+		StatusListBaseURI: envOr("R2PS_WP_STATUS_LIST_BASE", "https://wp.example.com/statuslists"),
+		WKATTL:            envDuration("R2PS_WP_WKA_TTL", 24*time.Hour),
+		WIATTL:            envDuration("R2PS_WP_WIA_TTL", 12*time.Hour),
+		StatusMaintenancePeriod: envDuration("R2PS_WP_STATUS_MAINT", 31*24*time.Hour),
+	}
 }

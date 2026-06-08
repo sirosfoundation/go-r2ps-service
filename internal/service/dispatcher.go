@@ -351,18 +351,21 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		return nil, &R2PSError{Code: r2ps.ErrUnsupportedType, Msg: "unknown service type"}
 	}
 
-	// 2FA service types require an authenticated session
-	sess := d.sessions.Get(req.TFASessionID)
-	if sess == nil {
-		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not found or expired"}
-	}
-	if !sess.Verified {
-		return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not verified"}
-	}
+	// 1FA service types bypass session verification.
+	if !is1FAServiceType(req.Type) {
+		// 2FA service types require an authenticated session
+		sess := d.sessions.Get(req.TFASessionID)
+		if sess == nil {
+			return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not found or expired"}
+		}
+		if !sess.Verified {
+			return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not verified"}
+		}
 
-	// Validate session context matches request context
-	if sess.Context != req.Context {
-		return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: "session context mismatch"}
+		// Validate session context matches request context
+		if sess.Context != req.Context {
+			return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: "session context mismatch"}
+		}
 	}
 
 	// Data is now directly in the JWS payload (not separately encrypted)
@@ -435,4 +438,17 @@ type R2PSError struct {
 
 func (e *R2PSError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Msg)
+}
+
+// is1FAServiceType returns true for service types that operate in 1FA mode
+// (no 2FA session required). Per r2ps-service-types-register.md.
+func is1FAServiceType(typ string) bool {
+	switch typ {
+	case r2ps.TypeEUDIWWKAETSI, r2ps.TypeEUDIWWIAETSI,
+		r2ps.TypeP256Generate,
+		r2ps.TypeEUDIWWIRevoke, r2ps.TypeEUDIWWISuspend:
+		return true
+	default:
+		return false
+	}
 }

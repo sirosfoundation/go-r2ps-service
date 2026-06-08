@@ -247,8 +247,8 @@ func TestProcessServiceRequiresSession(t *testing.T) {
 		Ver:          r2ps.ProtocolVersion,
 		Nonce:        base64.URLEncoding.EncodeToString(icrypto.RandomBytes(16)),
 		Iat:          time.Now().Unix(),
-		Type:         r2ps.TypeP256Generate,
-		Data:         json.RawMessage(`{"curve":"P-256"}`),
+		Type:         r2ps.TypeSignECDSA,
+		Data:         json.RawMessage(`{"kid":"test-kid","tbs_hash":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}`),
 		TFASessionID: "nonexistent",
 	})
 

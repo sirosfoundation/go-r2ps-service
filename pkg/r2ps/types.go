@@ -92,6 +92,79 @@ const (
 	TypeEUDIWWIAETSI = "eudiw_wia_etsi"
 )
 
+// EUDIW lifecycle service types — r2ps-service-types-register.md
+const (
+	TypeEUDIWWIRevoke  = "eudiw_wi_revoke"
+	TypeEUDIWWISuspend = "eudiw_wi_suspend"
+)
+
+// EUDIW request/response types — r2ps-service-types-eudiw.md
+
+// EUDIWAttestationRequest is the data payload for eudiw_wka_etsi and eudiw_wia_etsi.
+type EUDIWAttestationRequest struct {
+	KeysToAttest []string `json:"keys_to_attest"`
+	Ver          string   `json:"ver"`
+}
+
+// StatusListRef is a Token Status List reference (RFC 9701).
+type StatusListRef struct {
+	Idx int    `json:"idx"`
+	URI string `json:"uri"`
+}
+
+// StatusListStatus wraps a status_list reference.
+type StatusListStatus struct {
+	StatusList StatusListRef `json:"status_list"`
+}
+
+// StatusObject holds the status and optional expiry for WIA client_status / KA key_storage_status.
+type StatusObject struct {
+	Status StatusListStatus `json:"status"`
+	Exp    int64            `json:"exp,omitempty"`
+}
+
+// WKAPayload is the decoded payload of a Wallet Key Attestation JWT.
+// Per CS-04 §7.1 / TS-03 clause 2.3.2.
+type WKAPayload struct {
+	Iat                int64              `json:"iat"`
+	Exp                int64              `json:"exp"`
+	AttestedKeys       []json.RawMessage  `json:"attested_keys"`
+	KeyStorage         []string           `json:"key_storage"`
+	UserAuthentication []string           `json:"user_authentication"`
+	Certification      string             `json:"certification"`
+	WalletLink         string             `json:"wallet_link,omitempty"`
+	KeyStorageStatus   StatusObject       `json:"key_storage_status"`
+}
+
+// WIAPayload is the decoded payload of a Wallet Instance Attestation JWT.
+// Per CS-04 §7.1 / TS-03 clause 2.3.1.
+type WIAPayload struct {
+	Iat                                    int64        `json:"iat"`
+	Exp                                    int64        `json:"exp"`
+	Sub                                    string       `json:"sub"`
+	WalletName                             string       `json:"wallet_name"`
+	WalletVersion                          string       `json:"wallet_version"`
+	WalletSolutionCertificationInformation interface{}  `json:"wallet_solution_certification_information"`
+	WalletLink                             string       `json:"wallet_link,omitempty"`
+	ClientStatus                           StatusObject `json:"client_status"`
+	Cnf                                    CnfClaim     `json:"cnf"`
+}
+
+// CnfClaim is the confirmation claim containing a JWK.
+type CnfClaim struct {
+	JWK json.RawMessage `json:"jwk"`
+}
+
+// WKAResponse is the data payload returned by eudiw_wka_etsi.
+type WKAResponse struct {
+	WKA string `json:"wka"`
+}
+
+// WIAResponse is the data payload returned by eudiw_wia_etsi.
+type WIAResponse struct {
+	WIA string `json:"wia"`
+}
+
 // JWS typ header values — r2ps-service-types.md §2.1
 const (
 	TypRequest  = "r2ps-request+jwt"

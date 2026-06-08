@@ -107,3 +107,32 @@ func ecAlgorithm(curve elliptic.Curve) (jose.SignatureAlgorithm, error) {
 		return "", errors.New("unsupported curve")
 	}
 }
+
+// SignJWT creates a JWT (JWS compact serialization) with the given typ and optional x5c chain.
+// x5cDER is a chain of DER-encoded certificates; if nil, no x5c header is set.
+func SignJWT(payload []byte, key *ecdsa.PrivateKey, typ string, x5cDER [][]byte) (string, error) {
+	alg, err := ecAlgorithm(key.Curve)
+	if err != nil {
+		return "", err
+	}
+
+	sopts := jose.SignerOptions{}
+	sopts.WithType(jose.ContentType(typ))
+	if len(x5cDER) > 0 {
+		certs := make([]jose.JSONWebKey, 0) // not used directly
+		_ = certs
+		sopts.WithHeader("x5c", x5cDER)
+	}
+
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: alg, Key: key}, &sopts)
+	if err != nil {
+		return "", fmt.Errorf("create signer: %w", err)
+	}
+
+	jws, err := signer.Sign(payload)
+	if err != nil {
+		return "", fmt.Errorf("sign: %w", err)
+	}
+
+	return jws.CompactSerialize()
+}
