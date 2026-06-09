@@ -8,6 +8,16 @@ const (
 	StatusSuspended byte = 2
 )
 
+// PublicKeyInfo holds a public key exported from the WSCD (HSM).
+// Only public material is stored — the private key never leaves the HSM.
+type PublicKeyInfo struct {
+	Kid          string `json:"kid" bson:"kid"`
+	Curve        string `json:"curve" bson:"curve"`
+	PubKey       []byte `json:"pub_key" bson:"pub_key"`             // compressed EC point
+	CreationTime int64  `json:"creation_time" bson:"creation_time"` // Unix seconds
+	ClientID     string `json:"client_id" bson:"client_id"`         // owning wallet instance
+}
+
 // Store provides persistence for R2PS attestation lifecycle state.
 type Store interface {
 	// AllocateIndex returns the next available status list index for a category ("ka" or "wia").
@@ -33,4 +43,19 @@ type Store interface {
 
 	// IsUsed returns true if the WUA at idx has already been used.
 	IsUsed(category string, idx int) (bool, error)
+
+	// PutPublicKey stores a public key exported from the WSCD.
+	PutPublicKey(key PublicKeyInfo) error
+
+	// GetPublicKey retrieves a public key by kid.
+	GetPublicKey(kid string) (*PublicKeyInfo, error)
+
+	// ListPublicKeys returns all public keys, optionally filtered by client ID.
+	ListPublicKeys(clientID string) ([]PublicKeyInfo, error)
+
+	// PutRecord stores an OPAQUE client record.
+	PutRecord(clientID, context string, record []byte) error
+
+	// GetRecord retrieves an OPAQUE client record.
+	GetRecord(clientID, context string) ([]byte, error)
 }

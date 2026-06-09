@@ -10,18 +10,18 @@ import (
 type EventType string
 
 const (
-	EventKeyGenerate       EventType = "key_generate"
-	EventKeySign           EventType = "key_sign"
-	EventKeyAgree          EventType = "key_agree"
-	EventKeyDelete         EventType = "key_delete"
-	EventWKAIssued         EventType = "wka_issued"
-	EventWIAIssued         EventType = "wia_issued"
-	EventWIRevoked         EventType = "wi_revoked"
-	EventWISuspended       EventType = "wi_suspended"
-	Event2FARegistered     EventType = "2fa_registered"
-	Event2FAAuthenticated  EventType = "2fa_authenticated"
-	Event2FAChanged        EventType = "2fa_changed"
-	Event2FAFailed         EventType = "2fa_failed"
+	EventKeyGenerate      EventType = "key_generate"
+	EventKeySign          EventType = "key_sign"
+	EventKeyAgree         EventType = "key_agree"
+	EventKeyDelete        EventType = "key_delete"
+	EventWKAIssued        EventType = "wka_issued"
+	EventWIAIssued        EventType = "wia_issued"
+	EventWIRevoked        EventType = "wi_revoked"
+	EventWISuspended      EventType = "wi_suspended"
+	Event2FARegistered    EventType = "2fa_registered"
+	Event2FAAuthenticated EventType = "2fa_authenticated"
+	Event2FAChanged       EventType = "2fa_changed"
+	Event2FAFailed        EventType = "2fa_failed"
 )
 
 // Logger emits structured audit events.

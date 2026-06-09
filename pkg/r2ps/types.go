@@ -48,10 +48,10 @@ type TFAResponseData struct {
 
 // TFAAuthResponseData extends TFAResponseData with session establishment fields.
 type TFAAuthResponseData struct {
-	TFASessionID        string `json:"2fa_session_id,omitempty"`
-	Response            string `json:"response,omitempty"`
-	Message             string `json:"message,omitempty"`
-	SessionExpirationTime int64 `json:"session_expiration_time,omitempty"`
+	TFASessionID          string `json:"2fa_session_id,omitempty"`
+	Response              string `json:"response,omitempty"`
+	Message               string `json:"message,omitempty"`
+	SessionExpirationTime int64  `json:"session_expiration_time,omitempty"`
 }
 
 // Protocol version
@@ -126,14 +126,14 @@ type StatusObject struct {
 // WKAPayload is the decoded payload of a Wallet Key Attestation JWT.
 // Per CS-04 §7.1 / TS-03 clause 2.3.2.
 type WKAPayload struct {
-	Iat                int64              `json:"iat"`
-	Exp                int64              `json:"exp"`
-	AttestedKeys       []json.RawMessage  `json:"attested_keys"`
-	KeyStorage         []string           `json:"key_storage"`
-	UserAuthentication []string           `json:"user_authentication"`
-	Certification      string             `json:"certification"`
-	WalletLink         string             `json:"wallet_link,omitempty"`
-	KeyStorageStatus   StatusObject       `json:"key_storage_status"`
+	Iat                int64             `json:"iat"`
+	Exp                int64             `json:"exp"`
+	AttestedKeys       []json.RawMessage `json:"attested_keys"`
+	KeyStorage         []string          `json:"key_storage"`
+	UserAuthentication []string          `json:"user_authentication"`
+	Certification      string            `json:"certification"`
+	WalletLink         string            `json:"wallet_link,omitempty"`
+	KeyStorageStatus   StatusObject      `json:"key_storage_status"`
 }
 
 // WIAPayload is the decoded payload of a Wallet Instance Attestation JWT.
@@ -214,8 +214,8 @@ const (
 	TypeHSMECDSA        = TypeSignECDSA
 	TypeHSMECDH         = TypeAgreeECDH
 	TypeHSMListKeys     = "hsm_list_keys" // removed from spec register
-	EncDevice           = "device"         // deprecated: use 1FA JWE mode
-	EncUser             = "user"           // deprecated: use 2FA JWE mode
+	EncDevice           = "device"        // deprecated: use 1FA JWE mode
+	EncUser             = "user"          // deprecated: use 2FA JWE mode
 	PAKEProtocolOPAQUE  = TFAModeOPAQUE
 	PAKEStateEvaluate   = StateEvaluate
 	PAKEStateFinalize   = StateFinalize

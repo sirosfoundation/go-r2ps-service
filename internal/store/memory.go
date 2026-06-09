@@ -8,10 +8,12 @@ import (
 // MemoryStore is an in-memory implementation of Store for development and testing.
 type MemoryStore struct {
 	mu            sync.Mutex
-	counters      map[string]int         // category -> next index
-	statuses      map[string]map[int]byte // category -> idx -> status
-	clientIndices map[string][]int        // "clientID|category" -> []idx
-	usage         map[string]bool         // "category|idx" -> used
+	counters      map[string]int           // category -> next index
+	statuses      map[string]map[int]byte  // category -> idx -> status
+	clientIndices map[string][]int         // "clientID|category" -> []idx
+	usage         map[string]bool          // "category|idx" -> used
+	publicKeys    map[string]PublicKeyInfo // kid -> PublicKeyInfo
+	records       map[string][]byte        // "clientID|context" -> OPAQUE record bytes
 }
 
 // NewMemoryStore creates a new in-memory store.
@@ -21,6 +23,8 @@ func NewMemoryStore() *MemoryStore {
 		statuses:      make(map[string]map[int]byte),
 		clientIndices: make(map[string][]int),
 		usage:         make(map[string]bool),
+		publicKeys:    make(map[string]PublicKeyInfo),
+		records:       make(map[string][]byte),
 	}
 }
 
@@ -107,4 +111,55 @@ func (m *MemoryStore) IsUsed(category string, idx int) (bool, error) {
 	defer m.mu.Unlock()
 	key := fmt.Sprintf("%s|%d", category, idx)
 	return m.usage[key], nil
+}
+
+func (m *MemoryStore) PutPublicKey(key PublicKeyInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.publicKeys[key.Kid] = key
+	return nil
+}
+
+func (m *MemoryStore) GetPublicKey(kid string) (*PublicKeyInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.publicKeys[kid]
+	if !ok {
+		return nil, fmt.Errorf("key %q not found", kid)
+	}
+	return &k, nil
+}
+
+func (m *MemoryStore) ListPublicKeys(clientID string) ([]PublicKeyInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []PublicKeyInfo
+	for _, k := range m.publicKeys {
+		if clientID == "" || k.ClientID == clientID {
+			result = append(result, k)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStore) PutRecord(clientID, context string, record []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := clientID + "|" + context
+	m.records[key] = make([]byte, len(record))
+	copy(m.records[key], record)
+	return nil
+}
+
+func (m *MemoryStore) GetRecord(clientID, context string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := clientID + "|" + context
+	r, ok := m.records[key]
+	if !ok {
+		return nil, fmt.Errorf("no record for %s/%s", clientID, context)
+	}
+	result := make([]byte, len(r))
+	copy(result, r)
+	return result, nil
 }

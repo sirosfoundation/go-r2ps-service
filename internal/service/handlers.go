@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
+	"github.com/sirosfoundation/go-r2ps-service/internal/store"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
 
@@ -39,6 +40,7 @@ func NewECDSAHandler(backend hsm.Backend) *ECDSAHandler {
 }
 
 func (h *ECDSAHandler) Type() string { return r2ps.TypeSignECDSA }
+func (h *ECDSAHandler) Mode() string { return Mode2FA }
 
 func (h *ECDSAHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
 	start := time.Now()
@@ -85,16 +87,18 @@ type ECKeygenResponse struct {
 }
 
 type ECKeygenHandler struct {
-	backend hsm.Backend
+	backend  hsm.Backend
+	keyStore store.Store // public key export destination
 }
 
-func NewECKeygenHandler(backend hsm.Backend) *ECKeygenHandler {
-	return &ECKeygenHandler{backend: backend}
+func NewECKeygenHandler(backend hsm.Backend, keyStore store.Store) *ECKeygenHandler {
+	return &ECKeygenHandler{backend: backend, keyStore: keyStore}
 }
 
 func (h *ECKeygenHandler) Type() string { return r2ps.TypeP256Generate }
+func (h *ECKeygenHandler) Mode() string { return Mode1FA }
 
-func (h *ECKeygenHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
+func (h *ECKeygenHandler) Handle(ctx context.Context, clientID string, reqData []byte) ([]byte, error) {
 	start := time.Now()
 	var req ECKeygenRequest
 	if err := json.Unmarshal(reqData, &req); err != nil {
@@ -108,8 +112,17 @@ func (h *ECKeygenHandler) Handle(ctx context.Context, _ string, reqData []byte) 
 		return nil, fmt.Errorf("keygen: %w", err)
 	}
 	HSMOperationsTotal.WithLabelValues("keygen", "success").Inc()
-	_ = kid    // kid available via list_keys
-	_ = pubKey // public key available via list_keys
+
+	// Export public key to the store so WSCA can resolve keys without HSM access.
+	if h.keyStore != nil {
+		_ = h.keyStore.PutPublicKey(store.PublicKeyInfo{
+			Kid:          kid,
+			Curve:        req.Curve,
+			PubKey:       pubKey,
+			CreationTime: time.Now().Unix(),
+			ClientID:     clientID,
+		})
+	}
 
 	// Spec §1.2: response confirms the curve for which a key was created.
 	resp := ECKeygenResponse{
@@ -137,6 +150,7 @@ func NewECDHHandler(backend hsm.Backend) *ECDHHandler {
 }
 
 func (h *ECDHHandler) Type() string { return r2ps.TypeAgreeECDH }
+func (h *ECDHHandler) Mode() string { return Mode2FA }
 
 func (h *ECDHHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
 	start := time.Now()
@@ -200,6 +214,7 @@ func NewListKeysHandler(backend hsm.Backend) *ListKeysHandler {
 }
 
 func (h *ListKeysHandler) Type() string { return r2ps.TypeHSMListKeys }
+func (h *ListKeysHandler) Mode() string { return Mode2FA }
 
 func (h *ListKeysHandler) Handle(ctx context.Context, _ string, reqData []byte) ([]byte, error) {
 	start := time.Now()

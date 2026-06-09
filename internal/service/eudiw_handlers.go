@@ -14,7 +14,6 @@ import (
 
 	"github.com/sirosfoundation/go-r2ps-service/internal/audit"
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
-	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
 	"github.com/sirosfoundation/go-r2ps-service/internal/store"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
@@ -60,15 +59,15 @@ type WalletProviderConfig struct {
 
 // WKAHandler produces Wallet Key Attestation JWTs per CS-04 / TS-03 clause 2.3.2.
 type WKAHandler struct {
-	backend hsm.Backend
-	cfg     *WalletProviderConfig
+	cfg *WalletProviderConfig
 }
 
-func NewWKAHandler(backend hsm.Backend, cfg *WalletProviderConfig) *WKAHandler {
-	return &WKAHandler{backend: backend, cfg: cfg}
+func NewWKAHandler(cfg *WalletProviderConfig) *WKAHandler {
+	return &WKAHandler{cfg: cfg}
 }
 
 func (h *WKAHandler) Type() string { return r2ps.TypeEUDIWWKAETSI }
+func (h *WKAHandler) Mode() string { return Mode1FA }
 
 func (h *WKAHandler) Handle(ctx context.Context, clientID string, reqData []byte) ([]byte, error) {
 	var req r2ps.EUDIWAttestationRequest
@@ -156,34 +155,28 @@ func (h *WKAHandler) Handle(ctx context.Context, clientID string, reqData []byte
 	return json.Marshal(resp)
 }
 
-// resolveKeyJWK looks up a key by kid from the HSM and returns its JWK JSON.
-func (h *WKAHandler) resolveKeyJWK(ctx context.Context, kid string) (json.RawMessage, error) {
-	keys, err := h.backend.ListKeys(ctx, nil)
+// resolveKeyJWK looks up a key by kid from the store and returns its JWK JSON.
+func (h *WKAHandler) resolveKeyJWK(_ context.Context, kid string) (json.RawMessage, error) {
+	key, err := h.cfg.Store.GetPublicKey(kid)
 	if err != nil {
-		return nil, fmt.Errorf("list keys: %w", err)
+		return nil, err
 	}
-
-	for _, k := range keys {
-		if k.Kid == kid {
-			return pubKeyToJWK(k.PubKey, k.Curve)
-		}
-	}
-	return nil, fmt.Errorf("key %q not found", kid)
+	return pubKeyToJWK(key.PubKey, key.Curve)
 }
 
 // --- WIA Handler ---
 
 // WIAHandler produces Wallet Instance Attestation JWTs per CS-04 / TS-03 clause 2.3.1.
 type WIAHandler struct {
-	backend hsm.Backend
-	cfg     *WalletProviderConfig
+	cfg *WalletProviderConfig
 }
 
-func NewWIAHandler(backend hsm.Backend, cfg *WalletProviderConfig) *WIAHandler {
-	return &WIAHandler{backend: backend, cfg: cfg}
+func NewWIAHandler(cfg *WalletProviderConfig) *WIAHandler {
+	return &WIAHandler{cfg: cfg}
 }
 
 func (h *WIAHandler) Type() string { return r2ps.TypeEUDIWWIAETSI }
+func (h *WIAHandler) Mode() string { return Mode1FA }
 
 func (h *WIAHandler) Handle(ctx context.Context, clientID string, reqData []byte) ([]byte, error) {
 	var req r2ps.EUDIWAttestationRequest
@@ -264,19 +257,13 @@ func (h *WIAHandler) Handle(ctx context.Context, clientID string, reqData []byte
 	return json.Marshal(resp)
 }
 
-// resolveKeyJWK looks up a key by kid from the HSM and returns its JWK JSON.
-func (h *WIAHandler) resolveKeyJWK(ctx context.Context, kid string) (json.RawMessage, error) {
-	keys, err := h.backend.ListKeys(ctx, nil)
+// resolveKeyJWK looks up a key by kid from the store and returns its JWK JSON.
+func (h *WIAHandler) resolveKeyJWK(_ context.Context, kid string) (json.RawMessage, error) {
+	key, err := h.cfg.Store.GetPublicKey(kid)
 	if err != nil {
-		return nil, fmt.Errorf("list keys: %w", err)
+		return nil, err
 	}
-
-	for _, k := range keys {
-		if k.Kid == kid {
-			return pubKeyToJWK(k.PubKey, k.Curve)
-		}
-	}
-	return nil, fmt.Errorf("key %q not found", kid)
+	return pubKeyToJWK(key.PubKey, key.Curve)
 }
 
 // pubKeyToJWK converts an EC point (compressed or uncompressed) to a JWK JSON representation.
@@ -351,6 +338,7 @@ func NewWIRevokeHandler(cfg *WalletProviderConfig) *WIRevokeHandler {
 }
 
 func (h *WIRevokeHandler) Type() string { return r2ps.TypeEUDIWWIRevoke }
+func (h *WIRevokeHandler) Mode() string { return Mode1FA }
 
 func (h *WIRevokeHandler) Handle(_ context.Context, clientID string, reqData []byte) ([]byte, error) {
 	var req r2ps.WIRevokeRequest
@@ -406,6 +394,7 @@ func NewWISuspendHandler(cfg *WalletProviderConfig) *WISuspendHandler {
 }
 
 func (h *WISuspendHandler) Type() string { return r2ps.TypeEUDIWWISuspend }
+func (h *WISuspendHandler) Mode() string { return Mode1FA }
 
 func (h *WISuspendHandler) Handle(_ context.Context, clientID string, reqData []byte) ([]byte, error) {
 	var req r2ps.WISuspendRequest

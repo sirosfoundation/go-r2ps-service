@@ -47,13 +47,25 @@ func TestWKAHandler(t *testing.T) {
 	ctx := context.Background()
 
 	// Generate a key in the HSM
-	kid, _, err := backend.GenerateECKey(ctx, "P-256")
+	kid, pubKey, err := backend.GenerateECKey(ctx, "P-256")
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
 
 	cfg, wpKey := testWPConfig(t)
-	handler := NewWKAHandler(backend, cfg)
+
+	// Export the public key to the store (as the keygen handler would do)
+	if err := cfg.Store.PutPublicKey(store.PublicKeyInfo{
+		Kid:          kid,
+		Curve:        "P-256",
+		PubKey:       pubKey,
+		CreationTime: time.Now().Unix(),
+		ClientID:     "test-client",
+	}); err != nil {
+		t.Fatalf("put public key: %v", err)
+	}
+
+	handler := NewWKAHandler(cfg)
 
 	if handler.Type() != r2ps.TypeEUDIWWKAETSI {
 		t.Errorf("Type() = %q, want %q", handler.Type(), r2ps.TypeEUDIWWKAETSI)
@@ -134,11 +146,8 @@ func TestWKAHandler(t *testing.T) {
 }
 
 func TestWKAHandlerRejectsInvalidVersion(t *testing.T) {
-	backend, cleanup := hsm.NewTestBackend(t)
-	defer cleanup()
-
 	cfg, _ := testWPConfig(t)
-	handler := NewWKAHandler(backend, cfg)
+	handler := NewWKAHandler(cfg)
 
 	reqData, _ := json.Marshal(r2ps.EUDIWAttestationRequest{
 		KeysToAttest: []string{"some-kid"},
@@ -152,11 +161,8 @@ func TestWKAHandlerRejectsInvalidVersion(t *testing.T) {
 }
 
 func TestWKAHandlerRejectsEmptyKeys(t *testing.T) {
-	backend, cleanup := hsm.NewTestBackend(t)
-	defer cleanup()
-
 	cfg, _ := testWPConfig(t)
-	handler := NewWKAHandler(backend, cfg)
+	handler := NewWKAHandler(cfg)
 
 	reqData, _ := json.Marshal(r2ps.EUDIWAttestationRequest{
 		KeysToAttest: []string{},
@@ -175,13 +181,25 @@ func TestWIAHandler(t *testing.T) {
 
 	ctx := context.Background()
 
-	kid, _, err := backend.GenerateECKey(ctx, "P-256")
+	kid, pubKey, err := backend.GenerateECKey(ctx, "P-256")
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
 
 	cfg, wpKey := testWPConfig(t)
-	handler := NewWIAHandler(backend, cfg)
+
+	// Export the public key to the store
+	if err := cfg.Store.PutPublicKey(store.PublicKeyInfo{
+		Kid:          kid,
+		Curve:        "P-256",
+		PubKey:       pubKey,
+		CreationTime: time.Now().Unix(),
+		ClientID:     "test-client",
+	}); err != nil {
+		t.Fatalf("put public key: %v", err)
+	}
+
+	handler := NewWIAHandler(cfg)
 
 	if handler.Type() != r2ps.TypeEUDIWWIAETSI {
 		t.Errorf("Type() = %q, want %q", handler.Type(), r2ps.TypeEUDIWWIAETSI)
@@ -276,12 +294,13 @@ func TestWIAHandlerRejectsLongTTL(t *testing.T) {
 	backend, cleanup := hsm.NewTestBackend(t)
 	defer cleanup()
 
-	kid, _, _ := backend.GenerateECKey(context.Background(), "P-256")
+	kid, pubKey, _ := backend.GenerateECKey(context.Background(), "P-256")
 
 	cfg, _ := testWPConfig(t)
 	cfg.WIATTL = 25 * time.Hour // > 24h: violates CS-04
 
-	handler := NewWIAHandler(backend, cfg)
+	_ = cfg.Store.PutPublicKey(store.PublicKeyInfo{Kid: kid, Curve: "P-256", PubKey: pubKey, CreationTime: time.Now().Unix(), ClientID: "test-client"})
+	handler := NewWIAHandler(cfg)
 
 	reqData, _ := json.Marshal(r2ps.EUDIWAttestationRequest{
 		KeysToAttest: []string{kid},
@@ -314,11 +333,12 @@ func TestStatusListIndexAllocation(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	kid, _, _ := backend.GenerateECKey(ctx, "P-256")
+	kid, pubKey, _ := backend.GenerateECKey(ctx, "P-256")
 
 	cfg, _ := testWPConfig(t)
-	wkaHandler := NewWKAHandler(backend, cfg)
-	wiaHandler := NewWIAHandler(backend, cfg)
+	_ = cfg.Store.PutPublicKey(store.PublicKeyInfo{Kid: kid, Curve: "P-256", PubKey: pubKey, CreationTime: time.Now().Unix(), ClientID: "client-1"})
+	wkaHandler := NewWKAHandler(cfg)
+	wiaHandler := NewWIAHandler(cfg)
 
 	reqData, _ := json.Marshal(r2ps.EUDIWAttestationRequest{
 		KeysToAttest: []string{kid},
@@ -371,11 +391,12 @@ func TestWIRevokeHandler(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	kid, _, _ := backend.GenerateECKey(ctx, "P-256")
+	kid, pubKey, _ := backend.GenerateECKey(ctx, "P-256")
 
 	cfg, _ := testWPConfig(t)
-	wkaHandler := NewWKAHandler(backend, cfg)
-	wiaHandler := NewWIAHandler(backend, cfg)
+	_ = cfg.Store.PutPublicKey(store.PublicKeyInfo{Kid: kid, Curve: "P-256", PubKey: pubKey, CreationTime: time.Now().Unix(), ClientID: "client-1"})
+	wkaHandler := NewWKAHandler(cfg)
+	wiaHandler := NewWIAHandler(cfg)
 
 	reqData, _ := json.Marshal(r2ps.EUDIWAttestationRequest{
 		KeysToAttest: []string{kid},
@@ -425,10 +446,11 @@ func TestWISuspendHandler(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	kid, _, _ := backend.GenerateECKey(ctx, "P-256")
+	kid, pubKey, _ := backend.GenerateECKey(ctx, "P-256")
 
 	cfg, _ := testWPConfig(t)
-	wkaHandler := NewWKAHandler(backend, cfg)
+	_ = cfg.Store.PutPublicKey(store.PublicKeyInfo{Kid: kid, Curve: "P-256", PubKey: pubKey, CreationTime: time.Now().Unix(), ClientID: "client-2"})
+	wkaHandler := NewWKAHandler(cfg)
 
 	reqData, _ := json.Marshal(r2ps.EUDIWAttestationRequest{
 		KeysToAttest: []string{kid},

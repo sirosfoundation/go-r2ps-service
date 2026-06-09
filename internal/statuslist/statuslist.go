@@ -20,9 +20,9 @@ import (
 // Config holds the signing key and metadata for status list publishing.
 type Config struct {
 	SigningKey *ecdsa.PrivateKey
-	X5CChain  [][]byte
-	BaseURI   string        // e.g. "https://wp.example.com/statuslists"
-	TTL       time.Duration // status list JWT validity; default 1h
+	X5CChain   [][]byte
+	BaseURI    string        // e.g. "https://wp.example.com/statuslists"
+	TTL        time.Duration // status list JWT validity; default 1h
 }
 
 // Handler serves Token Status List JWTs at /statuslists/{category}/{listID}.

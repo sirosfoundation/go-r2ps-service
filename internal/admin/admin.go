@@ -32,6 +32,8 @@ func New(s store.Store) *Handler {
 	h.mux.HandleFunc("GET /admin/store/clients/{clientID}/{category}", h.handleGetClientIndices)
 	h.mux.HandleFunc("GET /admin/store/usage/{category}/{idx}", h.handleGetUsage)
 	h.mux.HandleFunc("POST /admin/store/allocate/{category}", h.handleAllocateIndex)
+	h.mux.HandleFunc("GET /admin/store/keys", h.handleListKeys)
+	h.mux.HandleFunc("GET /admin/store/keys/{kid}", h.handleGetKey)
 	return h
 }
 
@@ -204,6 +206,48 @@ func (h *Handler) handleAllocateIndex(w http.ResponseWriter, r *http.Request) {
 		"category": category,
 		"idx":      idx,
 	})
+}
+
+// GET /admin/store/keys?client_id=...
+// Lists public keys, optionally filtered by client_id.
+func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
+	clientID := r.URL.Query().Get("client_id")
+	var keys []store.PublicKeyInfo
+	var err error
+
+	if clientID != "" {
+		keys, err = h.store.ListPublicKeys(clientID)
+	} else {
+		// List all — use empty client_id to get all
+		keys, err = h.store.ListPublicKeys("")
+	}
+	if err != nil {
+		writeAdminError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(keys),
+		"keys":  keys,
+	})
+}
+
+// GET /admin/store/keys/{kid}
+// Returns a single public key by kid.
+func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request) {
+	kid := r.PathValue("kid")
+
+	key, err := h.store.GetPublicKey(kid)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeAdminError(w, http.StatusNotFound, err.Error())
+		} else {
+			writeAdminError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, key)
 }
 
 func statusLabel(s byte) string {

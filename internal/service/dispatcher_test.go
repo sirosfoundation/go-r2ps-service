@@ -96,7 +96,7 @@ func setupDispatcher(t *testing.T) (*Dispatcher, *ecdsa.PrivateKey, *pake.Server
 		ServerKey:   serverKey,
 		OPAQUEKey:   opaqueKey,
 		Records:     NewInMemoryRecordStore(),
-		Handlers:    []Handler{NewECDSAHandler(backend), NewECKeygenHandler(backend), NewECDHHandler(backend), NewListKeysHandler(backend)},
+		Handlers:    []Handler{NewECDSAHandler(backend), NewECKeygenHandler(backend, nil), NewECDHHandler(backend), NewListKeysHandler(backend)},
 		MaxAttempts: 3,
 		LockoutDur:  1 * time.Minute,
 		SessionTTL:  5 * time.Minute,

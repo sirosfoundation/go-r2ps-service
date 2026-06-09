@@ -60,6 +60,11 @@ func NewOPAQUEServer(skm *ServerKeyMaterial) (*OPAQUEServer, error) {
 	}, nil
 }
 
+// Deserializer returns the OPAQUE deserializer for record deserialization.
+func (s *OPAQUEServer) Deserializer() *opaque.Deserializer {
+	return s.deserialize
+}
+
 // RegistrationResponse processes a client's registration request (evaluate phase).
 // credentialID should be a stable per-client identifier (e.g. client_id + kid).
 func (s *OPAQUEServer) RegistrationResponse(reqBytes []byte, credentialID []byte) ([]byte, error) {

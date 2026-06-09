@@ -47,7 +47,7 @@ func setupE2E(t *testing.T) (*service.Dispatcher, *client.Client) {
 		Records:   service.NewInMemoryRecordStore(),
 		Handlers: []service.Handler{
 			service.NewECDSAHandler(hsmBackend),
-			service.NewECKeygenHandler(hsmBackend),
+			service.NewECKeygenHandler(hsmBackend, nil),
 			service.NewListKeysHandler(hsmBackend),
 		},
 		MaxAttempts: 5,

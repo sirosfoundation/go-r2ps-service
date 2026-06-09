@@ -25,6 +25,7 @@ import (
 	"github.com/sirosfoundation/go-r2ps-service/internal/audit"
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
+	"github.com/sirosfoundation/go-r2ps-service/internal/modes"
 	"github.com/sirosfoundation/go-r2ps-service/internal/pake"
 	"github.com/sirosfoundation/go-r2ps-service/internal/service"
 	"github.com/sirosfoundation/go-r2ps-service/internal/statuslist"
@@ -36,6 +37,14 @@ func main() {
 	initLogging()
 
 	listen := envOr("R2PS_LISTEN", ":8443")
+
+	// Parse operating mode — determines which handlers are registered.
+	roles, err := modes.ParseRoles(envOr("R2PS_MODE", "all"))
+	if err != nil {
+		slog.Error("invalid R2PS_MODE", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("operating mode", "roles", roles.Strings())
 
 	// Generate ephemeral server key (production would load from config/HSM)
 	serverKey, err := icrypto.GenerateECKey(elliptic.P256())
@@ -50,46 +59,43 @@ func main() {
 		os.Exit(1)
 	}
 
-	hsmModule := os.Getenv("R2PS_HSM_MODULE")
-	if hsmModule == "" {
-		slog.Error("R2PS_HSM_MODULE must be set")
-		os.Exit(1)
-	}
-	hsmPIN := os.Getenv("R2PS_HSM_PIN")
-	if hsmPIN == "" {
-		slog.Error("R2PS_HSM_PIN must be set")
-		os.Exit(1)
-	}
-
-	hsmCfg := hsm.PKCS11Config{
-		ModulePath: hsmModule,
-		PIN:        hsmPIN,
-		PoolSize:   envInt("R2PS_HSM_POOL_SIZE", 4),
-	}
-	if label := os.Getenv("R2PS_HSM_TOKEN_LABEL"); label != "" {
-		hsmCfg.TokenLabel = label
-	}
-	if slotStr := os.Getenv("R2PS_HSM_SLOT"); slotStr != "" {
-		slot, err := strconv.ParseUint(slotStr, 10, 32)
-		if err != nil {
-			slog.Error("invalid R2PS_HSM_SLOT", "value", slotStr)
+	// HSM is only required when the WSCD role is active.
+	var hsmBackend *hsm.PKCS11Backend
+	if roles.Has(modes.RoleWSCD) {
+		hsmModule := os.Getenv("R2PS_HSM_MODULE")
+		if hsmModule == "" {
+			slog.Error("R2PS_HSM_MODULE must be set when wscd role is active")
 			os.Exit(1)
 		}
-		hsmCfg.SlotID = uint(slot)
-	}
+		hsmPIN := os.Getenv("R2PS_HSM_PIN")
+		if hsmPIN == "" {
+			slog.Error("R2PS_HSM_PIN must be set when wscd role is active")
+			os.Exit(1)
+		}
 
-	hsmBackend, err := hsm.NewPKCS11Backend(hsmCfg)
-	if err != nil {
-		slog.Error("failed to connect to HSM", "error", err)
-		os.Exit(1)
-	}
-	defer hsmBackend.Close() //nolint:errcheck // best-effort cleanup on shutdown
+		hsmCfg := hsm.PKCS11Config{
+			ModulePath: hsmModule,
+			PIN:        hsmPIN,
+			PoolSize:   envInt("R2PS_HSM_POOL_SIZE", 4),
+		}
+		if label := os.Getenv("R2PS_HSM_TOKEN_LABEL"); label != "" {
+			hsmCfg.TokenLabel = label
+		}
+		if slotStr := os.Getenv("R2PS_HSM_SLOT"); slotStr != "" {
+			slot, err := strconv.ParseUint(slotStr, 10, 32)
+			if err != nil {
+				slog.Error("invalid R2PS_HSM_SLOT", "value", slotStr)
+				os.Exit(1)
+			}
+			hsmCfg.SlotID = uint(slot)
+		}
 
-	handlers := []service.Handler{
-		service.NewECDSAHandler(hsmBackend),
-		service.NewECKeygenHandler(hsmBackend),
-		service.NewECDHHandler(hsmBackend),
-		service.NewListKeysHandler(hsmBackend),
+		hsmBackend, err = hsm.NewPKCS11Backend(hsmCfg)
+		if err != nil {
+			slog.Error("failed to connect to HSM", "error", err)
+			os.Exit(1)
+		}
+		defer hsmBackend.Close() //nolint:errcheck // best-effort cleanup on shutdown
 	}
 
 	// Lifecycle store and audit logger.
@@ -118,27 +124,46 @@ func main() {
 	}
 	auditLogger := audit.New(slog.Default())
 
-	// EUDIW Wallet Provider attestation handlers (WKA/WIA).
-	wpCfg := walletProviderConfig(serverKey, lifecycleStore, auditLogger)
-	handlers = append(handlers,
-		service.NewWKAHandler(hsmBackend, wpCfg),
-		service.NewWIAHandler(hsmBackend, wpCfg),
-		service.NewWIRevokeHandler(wpCfg),
-		service.NewWISuspendHandler(wpCfg),
-	)
+	// Register handlers based on active roles.
+	var handlers []service.Handler
+
+	if roles.Has(modes.RoleWSCD) {
+		handlers = append(handlers,
+			service.NewECDSAHandler(hsmBackend),
+			service.NewECKeygenHandler(hsmBackend, lifecycleStore),
+			service.NewECDHHandler(hsmBackend),
+			service.NewListKeysHandler(hsmBackend),
+		)
+	}
+
+	if roles.Has(modes.RoleWSCA) {
+		wpCfg := walletProviderConfig(serverKey, lifecycleStore, auditLogger)
+		handlers = append(handlers,
+			service.NewWKAHandler(wpCfg),
+			service.NewWIAHandler(wpCfg),
+			service.NewWIRevokeHandler(wpCfg),
+			service.NewWISuspendHandler(wpCfg),
+		)
+	}
 
 	maxAttempts := envInt("R2PS_MAX_ATTEMPTS", 5)
 	lockoutDur := envDuration("R2PS_LOCKOUT_DURATION", 15*time.Minute)
 	sessionTTL := envDuration("R2PS_SESSION_TTL", 5*time.Minute)
 
+	opaqueServer, err := pake.NewOPAQUEServer(opaqueKey)
+	if err != nil {
+		slog.Error("failed to create OPAQUE server", "error", err)
+		os.Exit(1)
+	}
+
 	dispatcher, err := service.NewDispatcher(service.DispatcherConfig{
-		ServerKey:   serverKey,
-		OPAQUEKey:   opaqueKey,
-		Records:     service.NewInMemoryRecordStore(),
-		Handlers:    handlers,
-		MaxAttempts: maxAttempts,
-		LockoutDur:  lockoutDur,
-		SessionTTL:  sessionTTL,
+		ServerKey:    serverKey,
+		OPAQUEServer: opaqueServer,
+		Records:      service.NewStoreRecordStore(lifecycleStore, opaqueServer),
+		Handlers:     handlers,
+		MaxAttempts:  maxAttempts,
+		LockoutDur:   lockoutDur,
+		SessionTTL:   sessionTTL,
 	})
 	if err != nil {
 		slog.Error("failed to create dispatcher", "error", err)
@@ -154,7 +179,11 @@ func main() {
 
 	// Observability endpoints
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /readyz", readyzHandler(hsmBackend))
+	if hsmBackend != nil {
+		mux.HandleFunc("GET /readyz", readyzHandler(hsmBackend))
+	} else {
+		mux.HandleFunc("GET /readyz", handleHealthz)
+	}
 	mux.Handle("GET /metrics", promhttp.Handler())
 
 	// Backward compat
@@ -163,13 +192,16 @@ func main() {
 	// R2PS protocol endpoint
 	mux.HandleFunc("POST /r2ps", r2psHandler(dispatcher, hsmTimeout))
 
-	// Token Status List endpoint (RFC 9701 / CS-04 §7.2)
-	statusListHandler := statuslist.NewHandler(lifecycleStore, &statuslist.Config{
-		SigningKey: serverKey,
-		X5CChain:  wpCfg.X5CChain,
-		BaseURI:   wpCfg.StatusListBaseURI,
-	})
-	mux.Handle("GET /statuslists/", statusListHandler)
+	// Token Status List endpoint (RFC 9701 / CS-04 §7.2) — WSCA role only
+	if roles.Has(modes.RoleWSCA) {
+		wpCfg := walletProviderConfig(serverKey, lifecycleStore, auditLogger)
+		statusListHandler := statuslist.NewHandler(lifecycleStore, &statuslist.Config{
+			SigningKey: serverKey,
+			X5CChain:   wpCfg.X5CChain,
+			BaseURI:    wpCfg.StatusListBaseURI,
+		})
+		mux.Handle("GET /statuslists/", statusListHandler)
+	}
 
 	srv := &http.Server{
 		Addr:              listen,
@@ -194,33 +226,35 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Admin API (lifecycle store management) — bind to localhost only.
-	if adminListen := os.Getenv("R2PS_ADMIN_LISTEN"); adminListen != "" {
-		adminHandler := admin.New(lifecycleStore)
-		adminSrv := &http.Server{
-			Addr:              adminListen,
-			Handler:           adminHandler,
-			ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      10 * time.Second,
-		}
-		go func() {
-			slog.Info("starting admin API", "addr", adminListen)
-			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("admin server failed", "error", err)
+	// Admin API (lifecycle store management) — admin role required.
+	if roles.Has(modes.RoleAdmin) {
+		if adminListen := os.Getenv("R2PS_ADMIN_LISTEN"); adminListen != "" {
+			adminHandler := admin.New(lifecycleStore)
+			adminSrv := &http.Server{
+				Addr:              adminListen,
+				Handler:           adminHandler,
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       10 * time.Second,
+				WriteTimeout:      10 * time.Second,
 			}
-		}()
-		go func() {
-			<-ctx.Done()
-			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = adminSrv.Shutdown(shutCtx)
-		}()
+			go func() {
+				slog.Info("starting admin API", "addr", adminListen)
+				if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					slog.Error("admin server failed", "error", err)
+				}
+			}()
+			go func() {
+				<-ctx.Done()
+				shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = adminSrv.Shutdown(shutCtx)
+			}()
+		}
 	}
 
 	go func() {
 		slog.Info("starting server", "addr", listen, "tls", useTLS,
-			"hsm_pool_size", hsmBackend.PoolSize())
+			"roles", roles.Strings())
 		var err error
 		if useTLS {
 			err = srv.ListenAndServeTLS(tlsCert, tlsKey)

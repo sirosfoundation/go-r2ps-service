@@ -11,6 +11,7 @@ import (
 
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/internal/pake"
+	"github.com/sirosfoundation/go-r2ps-service/internal/store"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 
 	"github.com/bytemare/opaque"
@@ -49,6 +50,43 @@ func (s *InMemoryRecordStore) PutRecord(clientID, ctx string, record *opaque.Cli
 	return nil
 }
 
+// StoreRecordStore adapts a store.Store into a RecordStore by serializing
+// OPAQUE ClientRecords to/from bytes. This enables persistent (MongoDB-backed)
+// storage of OPAQUE credentials.
+type StoreRecordStore struct {
+	store        store.Store
+	deserializer *opaque.Deserializer
+}
+
+// NewStoreRecordStore creates a RecordStore backed by a store.Store.
+func NewStoreRecordStore(s store.Store, opaqueServer *pake.OPAQUEServer) *StoreRecordStore {
+	return &StoreRecordStore{
+		store:        s,
+		deserializer: opaqueServer.Deserializer(),
+	}
+}
+
+func (s *StoreRecordStore) GetRecord(clientID, ctx string) (*opaque.ClientRecord, error) {
+	data, err := s.store.GetRecord(clientID, ctx)
+	if err != nil {
+		return nil, err
+	}
+	record, err := s.deserializer.RegistrationRecord(data)
+	if err != nil {
+		return nil, fmt.Errorf("deserialize OPAQUE record: %w", err)
+	}
+	credID := []byte(ctx + "|" + clientID)
+	return &opaque.ClientRecord{
+		RegistrationRecord:   record,
+		CredentialIdentifier: credID,
+		ClientIdentity:       nil,
+	}, nil
+}
+
+func (s *StoreRecordStore) PutRecord(clientID, ctx string, record *opaque.ClientRecord) error {
+	return s.store.PutRecord(clientID, ctx, record.RegistrationRecord.Serialize())
+}
+
 // Dispatcher processes R2PS requests: verifies JWS, routes to 2FA or service handlers.
 type Dispatcher struct {
 	serverKey  *ecdsa.PrivateKey
@@ -64,22 +102,27 @@ type Dispatcher struct {
 
 // DispatcherConfig holds initialization parameters.
 type DispatcherConfig struct {
-	ServerKey   *ecdsa.PrivateKey
-	OPAQUEKey   *pake.ServerKeyMaterial
-	Records     RecordStore
-	ClientKeys  ClientKeyStore // optional; if nil, server key is used for JWS verification
-	Handlers    []Handler
-	MaxAttempts int
-	LockoutDur  time.Duration
-	SessionTTL  time.Duration
-	IatMaxSkew  time.Duration // max clock skew for iat validation; 0 = 5 minutes
+	ServerKey    *ecdsa.PrivateKey
+	OPAQUEKey    *pake.ServerKeyMaterial // deprecated: use OPAQUEServer
+	OPAQUEServer *pake.OPAQUEServer      // pre-built OPAQUE server; takes precedence
+	Records      RecordStore
+	ClientKeys   ClientKeyStore // optional; if nil, server key is used for JWS verification
+	Handlers     []Handler
+	MaxAttempts  int
+	LockoutDur   time.Duration
+	SessionTTL   time.Duration
+	IatMaxSkew   time.Duration // max clock skew for iat validation; 0 = 5 minutes
 }
 
 // NewDispatcher creates a fully wired dispatcher.
 func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
-	opaqueServer, err := pake.NewOPAQUEServer(cfg.OPAQUEKey)
-	if err != nil {
-		return nil, fmt.Errorf("create OPAQUE server: %w", err)
+	opaqueServer := cfg.OPAQUEServer
+	if opaqueServer == nil {
+		var err error
+		opaqueServer, err = pake.NewOPAQUEServer(cfg.OPAQUEKey)
+		if err != nil {
+			return nil, fmt.Errorf("create OPAQUE server: %w", err)
+		}
 	}
 
 	maxAttempts := cfg.MaxAttempts
@@ -352,7 +395,7 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 	}
 
 	// 1FA service types bypass session verification.
-	if !is1FAServiceType(req.Type) {
+	if handler.Mode() != Mode1FA {
 		// 2FA service types require an authenticated session
 		sess := d.sessions.Get(req.TFASessionID)
 		if sess == nil {
@@ -438,17 +481,4 @@ type R2PSError struct {
 
 func (e *R2PSError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Msg)
-}
-
-// is1FAServiceType returns true for service types that operate in 1FA mode
-// (no 2FA session required). Per r2ps-service-types-register.md.
-func is1FAServiceType(typ string) bool {
-	switch typ {
-	case r2ps.TypeEUDIWWKAETSI, r2ps.TypeEUDIWWIAETSI,
-		r2ps.TypeP256Generate,
-		r2ps.TypeEUDIWWIRevoke, r2ps.TypeEUDIWWISuspend:
-		return true
-	default:
-		return false
-	}
 }

@@ -79,7 +79,7 @@ func setupClientTest(t *testing.T) (*Client, *service.Dispatcher) {
 		ServerKey:   serverKey,
 		OPAQUEKey:   opaqueKey,
 		Records:     service.NewInMemoryRecordStore(),
-		Handlers:    []service.Handler{service.NewECKeygenHandler(backend), service.NewListKeysHandler(backend)},
+		Handlers:    []service.Handler{service.NewECKeygenHandler(backend, nil), service.NewListKeysHandler(backend)},
 		MaxAttempts: 3,
 		LockoutDur:  time.Minute,
 		SessionTTL:  5 * time.Minute,

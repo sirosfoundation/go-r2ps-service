@@ -81,14 +81,14 @@ func TestECDSAHandlerBadBase64(t *testing.T) {
 // --- EC Keygen Handler ---
 
 func TestECKeygenHandlerType(t *testing.T) {
-	h := NewECKeygenHandler(newMockBackend())
+	h := NewECKeygenHandler(newMockBackend(), nil)
 	if h.Type() != "p256_generate" {
 		t.Errorf("type = %q", h.Type())
 	}
 }
 
 func TestECKeygenHandlerSuccess(t *testing.T) {
-	h := NewECKeygenHandler(newMockBackend())
+	h := NewECKeygenHandler(newMockBackend(), nil)
 	req, _ := json.Marshal(ECKeygenRequest{Curve: "P-256"})
 
 	resp, err := h.Handle(context.Background(), "c1", req)
@@ -106,7 +106,7 @@ func TestECKeygenHandlerSuccess(t *testing.T) {
 }
 
 func TestECKeygenHandlerInvalidJSON(t *testing.T) {
-	h := NewECKeygenHandler(newMockBackend())
+	h := NewECKeygenHandler(newMockBackend(), nil)
 	_, err := h.Handle(context.Background(), "c1", []byte("{{"))
 	if err == nil {
 		t.Fatal("expected error")

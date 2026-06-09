@@ -58,6 +58,8 @@ type MongoDBStore struct {
 	statuses      *mongo.Collection
 	clientIndices *mongo.Collection
 	usage         *mongo.Collection
+	publicKeys    *mongo.Collection
+	records       *mongo.Collection
 }
 
 // NewMongoDBStore creates a new MongoDB-backed store.
@@ -129,6 +131,8 @@ func NewMongoDBStore(ctx context.Context, cfg *MongoDBConfig) (*MongoDBStore, er
 		statuses:      database.Collection("statuses"),
 		clientIndices: database.Collection("client_indices"),
 		usage:         database.Collection("usage"),
+		publicKeys:    database.Collection("public_keys"),
+		records:       database.Collection("opaque_records"),
 	}
 
 	if err := s.createIndexes(ctx); err != nil {
@@ -163,6 +167,24 @@ func (s *MongoDBStore) createIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create usage index: %w", err)
+	}
+
+	// public_keys: unique index on kid
+	_, err = s.publicKeys.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "kid", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create public_keys index: %w", err)
+	}
+
+	// opaque_records: unique compound index on (client_id, context)
+	_, err = s.records.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "client_id", Value: 1}, {Key: "context", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create records index: %w", err)
 	}
 
 	return nil
@@ -343,4 +365,91 @@ func (s *MongoDBStore) IsUsed(category string, idx int) (bool, error) {
 		return false, fmt.Errorf("failed to check usage: %w", err)
 	}
 	return true, nil
+}
+
+func (s *MongoDBStore) PutPublicKey(key PublicKeyInfo) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	opts := options.Replace().SetUpsert(true)
+	_, err := s.publicKeys.ReplaceOne(ctx, bson.M{"kid": key.Kid}, key, opts)
+	if err != nil {
+		return fmt.Errorf("failed to put public key: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoDBStore) GetPublicKey(kid string) (*PublicKeyInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var key PublicKeyInfo
+	err := s.publicKeys.FindOne(ctx, bson.M{"kid": kid}).Decode(&key)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("key %q not found", kid)
+		}
+		return nil, fmt.Errorf("failed to get public key: %w", err)
+	}
+	return &key, nil
+}
+
+func (s *MongoDBStore) ListPublicKeys(clientID string) ([]PublicKeyInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	filter := bson.M{}
+	if clientID != "" {
+		filter["client_id"] = clientID
+	}
+
+	cursor, err := s.publicKeys.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find public keys: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+
+	var keys []PublicKeyInfo
+	if err := cursor.All(ctx, &keys); err != nil {
+		return nil, fmt.Errorf("failed to decode public keys: %w", err)
+	}
+	return keys, nil
+}
+
+type opaqueRecordDoc struct {
+	ClientID string `bson:"client_id"`
+	Context  string `bson:"context"`
+	Record   []byte `bson:"record"`
+}
+
+func (s *MongoDBStore) PutRecord(clientID, ctxStr string, record []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	opts := options.Replace().SetUpsert(true)
+	_, err := s.records.ReplaceOne(
+		ctx,
+		bson.M{"client_id": clientID, "context": ctxStr},
+		opaqueRecordDoc{ClientID: clientID, Context: ctxStr, Record: record},
+		opts,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to put record: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoDBStore) GetRecord(clientID, ctxStr string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var doc opaqueRecordDoc
+	err := s.records.FindOne(ctx, bson.M{"client_id": clientID, "context": ctxStr}).Decode(&doc)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("no record for %s/%s", clientID, ctxStr)
+		}
+		return nil, fmt.Errorf("failed to get record: %w", err)
+	}
+	return doc.Record, nil
 }
