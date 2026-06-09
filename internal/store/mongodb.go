@@ -2,7 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -12,9 +17,16 @@ import (
 
 // MongoDBConfig holds the MongoDB connection configuration.
 type MongoDBConfig struct {
-	URI      string
-	Database string
-	Timeout  int // seconds
+	URI          string
+	Database     string
+	Timeout      int    // seconds
+	PasswordPath string // path to file containing MongoDB password (replaces placeholder in URI)
+
+	// TLS / mTLS configuration
+	TLSEnabled bool   // enable TLS for MongoDB connection
+	CAPath     string // path to CA certificate for server verification
+	CertPath   string // path to client certificate for mTLS
+	KeyPath    string // path to client key for mTLS
 }
 
 // statusEntry is the BSON document for the statuses collection.
@@ -55,9 +67,45 @@ func NewMongoDBStore(ctx context.Context, cfg *MongoDBConfig) (*MongoDBStore, er
 		timeout = 10
 	}
 
+	uri := cfg.URI
+
+	// Replace password placeholder from file (same pattern as go-wallet-backend).
+	if cfg.PasswordPath != "" {
+		raw, err := os.ReadFile(cfg.PasswordPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read MongoDB password file: %w", err)
+		}
+		password := strings.TrimSpace(string(raw))
+		uri = strings.Replace(uri, "${MONGODB_PASSWORD}", url.QueryEscape(password), 1)
+	}
+
 	clientOptions := options.Client().
-		ApplyURI(cfg.URI).
+		ApplyURI(uri).
 		SetConnectTimeout(time.Duration(timeout) * time.Second)
+
+	// TLS / mTLS configuration (mirrors go-wallet-backend).
+	if cfg.TLSEnabled {
+		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+		if cfg.CAPath != "" {
+			caCert, err := os.ReadFile(cfg.CAPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read MongoDB CA certificate: %w", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caCert) {
+				return nil, fmt.Errorf("failed to parse MongoDB CA certificate")
+			}
+			tlsCfg.RootCAs = pool
+		}
+		if cfg.CertPath != "" && cfg.KeyPath != "" {
+			cert, err := tls.LoadX509KeyPair(cfg.CertPath, cfg.KeyPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load MongoDB client certificate: %w", err)
+			}
+			tlsCfg.Certificates = []tls.Certificate{cert}
+		}
+		clientOptions.SetTLSConfig(tlsCfg)
+	}
 
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
@@ -123,6 +171,11 @@ func (s *MongoDBStore) createIndexes(ctx context.Context) error {
 // Close disconnects from MongoDB.
 func (s *MongoDBStore) Close(ctx context.Context) error {
 	return s.client.Disconnect(ctx)
+}
+
+// Ping verifies the MongoDB connection is alive.
+func (s *MongoDBStore) Ping(ctx context.Context) error {
+	return s.client.Ping(ctx, nil)
 }
 
 func (s *MongoDBStore) AllocateIndex(category string) (int, error) {

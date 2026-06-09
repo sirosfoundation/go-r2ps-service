@@ -21,6 +21,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/sirosfoundation/go-r2ps-service/internal/admin"
 	"github.com/sirosfoundation/go-r2ps-service/internal/audit"
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
@@ -95,9 +96,14 @@ func main() {
 	var lifecycleStore store.Store
 	if mongoURI := os.Getenv("R2PS_STORE_URI"); mongoURI != "" {
 		mongoStore, err := store.NewMongoDBStore(context.Background(), &store.MongoDBConfig{
-			URI:      mongoURI,
-			Database: envOr("R2PS_STORE_DATABASE", "r2ps"),
-			Timeout:  envInt("R2PS_STORE_TIMEOUT", 10),
+			URI:          mongoURI,
+			Database:     envOr("R2PS_STORE_DATABASE", "r2ps"),
+			Timeout:      envInt("R2PS_STORE_TIMEOUT", 10),
+			PasswordPath: os.Getenv("R2PS_STORE_PASSWORD_PATH"),
+			TLSEnabled:   os.Getenv("R2PS_STORE_TLS_ENABLED") == "true",
+			CAPath:       os.Getenv("R2PS_STORE_TLS_CA"),
+			CertPath:     os.Getenv("R2PS_STORE_TLS_CERT"),
+			KeyPath:      os.Getenv("R2PS_STORE_TLS_KEY"),
 		})
 		if err != nil {
 			slog.Error("failed to connect to MongoDB store", "error", err)
@@ -187,6 +193,30 @@ func main() {
 	// Graceful shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Admin API (lifecycle store management) — bind to localhost only.
+	if adminListen := os.Getenv("R2PS_ADMIN_LISTEN"); adminListen != "" {
+		adminHandler := admin.New(lifecycleStore)
+		adminSrv := &http.Server{
+			Addr:              adminListen,
+			Handler:           adminHandler,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+		}
+		go func() {
+			slog.Info("starting admin API", "addr", adminListen)
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("admin server failed", "error", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = adminSrv.Shutdown(shutCtx)
+		}()
+	}
 
 	go func() {
 		slog.Info("starting server", "addr", listen, "tls", useTLS,

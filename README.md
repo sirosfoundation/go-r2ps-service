@@ -48,6 +48,7 @@ internal/
   service/           Request dispatcher, HSM + EUDIW service handlers
   statuslist/        Token Status List publisher (RFC 9701)
   store/             Lifecycle state persistence (in-memory, MongoDB)
+  admin/             Admin API for store debugging and provisioning
 pkg/
   client/            R2PS client library (register, authenticate, call service)
   r2ps/              Protocol types and constants
@@ -127,6 +128,11 @@ docker compose up
 | `R2PS_STORE_URI` | (empty) | MongoDB connection URI; if unset, in-memory store is used |
 | `R2PS_STORE_DATABASE` | `r2ps` | MongoDB database name |
 | `R2PS_STORE_TIMEOUT` | `10` | MongoDB connect timeout (seconds) |
+| `R2PS_STORE_PASSWORD_PATH` | (empty) | File containing MongoDB password (replaces `${MONGODB_PASSWORD}` in URI) |
+| `R2PS_STORE_TLS_ENABLED` | `false` | Enable TLS for MongoDB connection |
+| `R2PS_STORE_TLS_CA` | (empty) | Path to CA certificate for server verification |
+| `R2PS_STORE_TLS_CERT` | (empty) | Path to client certificate for mTLS |
+| `R2PS_STORE_TLS_KEY` | (empty) | Path to client key for mTLS |
 
 #### Server
 
@@ -135,6 +141,24 @@ docker compose up
 | `R2PS_MAX_ATTEMPTS` | `5` | Max failed auth attempts before lockout |
 | `R2PS_LOCKOUT_DURATION` | `15m` | Lockout duration after max attempts |
 | `R2PS_SESSION_TTL` | `5m` | 2FA session time-to-live |
+
+#### Admin API
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `R2PS_ADMIN_LISTEN` | (disabled) | Admin API listen address (e.g. `127.0.0.1:9090`) |
+
+When `R2PS_ADMIN_LISTEN` is set, a separate HTTP server starts with lifecycle
+store management endpoints. **Must not be exposed to the public internet.**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/admin/store/statuses/{category}` | List all status entries for a category |
+| `GET` | `/admin/store/status/{category}/{idx}` | Get status + usage for a single index |
+| `PUT` | `/admin/store/status/{category}/{idx}` | Set status (body: `{"status": 0\|1\|2}`) |
+| `GET` | `/admin/store/clients/{clientID}/{category}` | List indices for a client |
+| `GET` | `/admin/store/usage/{category}/{idx}` | Check single-use status |
+| `POST` | `/admin/store/allocate/{category}` | Allocate a new status list index |
 
 ## Architecture
 
