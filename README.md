@@ -41,10 +41,13 @@ The authoritative R2PS protocol specifications are maintained in
 ```
 cmd/server/          HTTP server entry point
 internal/
+  audit/             Structured audit event logging
   crypto/            JWS signing/verification, ECDH
   hsm/               PKCS#11 backend (key generation, ECDSA, ECDH)
   pake/              OPAQUE server (registration, authentication, sessions)
   service/           Request dispatcher, HSM + EUDIW service handlers
+  statuslist/        Token Status List publisher (RFC 9701)
+  store/             Lifecycle state persistence (in-memory, MongoDB)
 pkg/
   client/            R2PS client library (register, authenticate, call service)
   r2ps/              Protocol types and constants
@@ -64,6 +67,8 @@ test/integration/    End-to-end tests (SoftHSM2)
 | `hsm_list_keys` | List keys in HSM | 2FA | WSCD |
 | `eudiw_wka_etsi` | Issue Wallet Key Attestation | 1FA | WSCA |
 | `eudiw_wia_etsi` | Issue Wallet Instance Attestation | 1FA | WSCA |
+| `eudiw_wi_revoke` | Revoke wallet instance attestations | 1FA | WSCA |
+| `eudiw_wi_suspend` | Suspend wallet instance attestations | 1FA | WSCA |
 
 See the [service type registry](docs/specs/r2ps-service-types-register.md) for
 the full list including planned types.
@@ -75,6 +80,7 @@ the full list including planned types.
 | `bytemare/opaque` v0.18.0 | OPAQUE RFC 9807 (P256Sha256) |
 | `go-jose/go-jose/v4` | JWS/JWE compact serialization |
 | `miekg/pkcs11` v1.1.2 | PKCS#11 CGo bindings |
+| `mongo-driver` v1.17.9 | MongoDB persistence (optional) |
 
 ## Quick Start
 
@@ -112,6 +118,15 @@ docker compose up
 | `R2PS_WP_WKA_TTL` | `24h` | WKA time-to-live |
 | `R2PS_WP_WIA_TTL` | `12h` | WIA time-to-live (MUST < 24h per CS-04) |
 | `R2PS_WP_STATUS_MAINT` | `744h` (31d) | Status maintenance period |
+| `R2PS_WP_X5C_PATH` | (empty) | PEM file with x5c certificate chain |
+
+#### Lifecycle Store (MongoDB)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `R2PS_STORE_URI` | (empty) | MongoDB connection URI; if unset, in-memory store is used |
+| `R2PS_STORE_DATABASE` | `r2ps` | MongoDB database name |
+| `R2PS_STORE_TIMEOUT` | `10` | MongoDB connect timeout (seconds) |
 
 #### Server
 

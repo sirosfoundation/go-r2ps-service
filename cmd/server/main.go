@@ -92,7 +92,24 @@ func main() {
 	}
 
 	// Lifecycle store and audit logger.
-	lifecycleStore := store.NewMemoryStore()
+	var lifecycleStore store.Store
+	if mongoURI := os.Getenv("R2PS_STORE_URI"); mongoURI != "" {
+		mongoStore, err := store.NewMongoDBStore(context.Background(), &store.MongoDBConfig{
+			URI:      mongoURI,
+			Database: envOr("R2PS_STORE_DATABASE", "r2ps"),
+			Timeout:  envInt("R2PS_STORE_TIMEOUT", 10),
+		})
+		if err != nil {
+			slog.Error("failed to connect to MongoDB store", "error", err)
+			os.Exit(1)
+		}
+		defer mongoStore.Close(context.Background()) //nolint:errcheck // best-effort cleanup on shutdown
+		slog.Info("using MongoDB lifecycle store", "uri", mongoURI)
+		lifecycleStore = mongoStore
+	} else {
+		slog.Warn("R2PS_STORE_URI not set — using in-memory lifecycle store (not for production)")
+		lifecycleStore = store.NewMemoryStore()
+	}
 	auditLogger := audit.New(slog.Default())
 
 	// EUDIW Wallet Provider attestation handlers (WKA/WIA).
