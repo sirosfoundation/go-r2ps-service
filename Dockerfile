@@ -18,7 +18,7 @@ RUN apk add --no-cache --upgrade ca-certificates softhsm curl && \
     adduser -D -u 1000 -h /app -s /sbin/nologin appuser && \
     rm -rf /var/cache/apk/*
 
-COPY --from=builder --chown=appuser:appuser /app/r2ps-server /app/r2ps-server
+COPY --from=builder --chown=appuser:appuser --chmod=0555 /app/r2ps-server /app/r2ps-server
 
 # SoftHSM2 token directory
 RUN mkdir -p /var/lib/softhsm/tokens && chown appuser:appuser /var/lib/softhsm/tokens
