@@ -10,7 +10,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
     -o r2ps-server ./cmd/server
 
 # Runtime stage
-FROM alpine:3.23
+FROM alpine:3.24
 WORKDIR /app
 
 # Security: upgrade all packages, install minimal deps, create non-root user
