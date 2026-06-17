@@ -49,4 +49,11 @@ var (
 		Name:      "active_sessions",
 		Help:      "Number of active PAKE sessions.",
 	})
+
+	// FIDO2AuthTotal counts FIDO2 authentication outcomes.
+	FIDO2AuthTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "r2ps",
+		Name:      "fido2_auth_total",
+		Help:      "Total FIDO2 authentication attempts by outcome.",
+	}, []string{"outcome"})
 )

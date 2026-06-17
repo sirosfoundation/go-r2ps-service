@@ -60,6 +60,7 @@ type MongoDBStore struct {
 	usage         *mongo.Collection
 	publicKeys    *mongo.Collection
 	records       *mongo.Collection
+	webauthnCreds *mongo.Collection
 }
 
 // NewMongoDBStore creates a new MongoDB-backed store.
@@ -133,6 +134,7 @@ func NewMongoDBStore(ctx context.Context, cfg *MongoDBConfig) (*MongoDBStore, er
 		usage:         database.Collection("usage"),
 		publicKeys:    database.Collection("public_keys"),
 		records:       database.Collection("opaque_records"),
+		webauthnCreds: database.Collection("webauthn_credentials"),
 	}
 
 	if err := s.createIndexes(ctx); err != nil {
@@ -185,6 +187,14 @@ func (s *MongoDBStore) createIndexes(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create records index: %w", err)
+	}
+
+	// webauthn_credentials: compound index on (client_id, context)
+	_, err = s.webauthnCreds.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "client_id", Value: 1}, {Key: "context", Value: 1}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create webauthn_credentials index: %w", err)
 	}
 
 	return nil
@@ -452,4 +462,86 @@ func (s *MongoDBStore) GetRecord(clientID, ctxStr string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to get record: %w", err)
 	}
 	return doc.Record, nil
+}
+
+// webauthnCredDoc is the BSON document for the webauthn_credentials collection.
+type webauthnCredDoc struct {
+	ClientID     string `bson:"client_id"`
+	Context      string `bson:"context"`
+	CredentialID []byte `bson:"credential_id"`
+	PublicKey    []byte `bson:"public_key"`
+	SignCount    uint32 `bson:"sign_count"`
+	AAGUID       []byte `bson:"aaguid"`
+	CreatedAt    int64  `bson:"created_at"`
+}
+
+func (s *MongoDBStore) PutWebAuthnCredential(clientID, ctxStr string, cred WebAuthnCredential) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	doc := webauthnCredDoc{
+		ClientID:     clientID,
+		Context:      ctxStr,
+		CredentialID: cred.CredentialID,
+		PublicKey:    cred.PublicKey,
+		SignCount:    cred.SignCount,
+		AAGUID:       cred.AAGUID,
+		CreatedAt:    cred.CreatedAt,
+	}
+
+	_, err := s.webauthnCreds.InsertOne(ctx, doc)
+	if err != nil {
+		return fmt.Errorf("failed to put WebAuthn credential: %w", err)
+	}
+	return nil
+}
+
+func (s *MongoDBStore) GetWebAuthnCredential(clientID, ctxStr string) ([]WebAuthnCredential, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cursor, err := s.webauthnCreds.Find(ctx, bson.M{"client_id": clientID, "context": ctxStr})
+	if err != nil {
+		return nil, fmt.Errorf("failed to find WebAuthn credentials: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var docs []webauthnCredDoc
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("failed to decode WebAuthn credentials: %w", err)
+	}
+
+	if len(docs) == 0 {
+		return nil, fmt.Errorf("no WebAuthn credentials for %s/%s", clientID, ctxStr)
+	}
+
+	creds := make([]WebAuthnCredential, len(docs))
+	for i, d := range docs {
+		creds[i] = WebAuthnCredential{
+			CredentialID: d.CredentialID,
+			PublicKey:    d.PublicKey,
+			SignCount:    d.SignCount,
+			AAGUID:       d.AAGUID,
+			CreatedAt:    d.CreatedAt,
+		}
+	}
+	return creds, nil
+}
+
+func (s *MongoDBStore) UpdateWebAuthnSignCount(clientID, ctxStr string, credentialID []byte, signCount uint32) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := s.webauthnCreds.UpdateOne(
+		ctx,
+		bson.M{"client_id": clientID, "context": ctxStr, "credential_id": credentialID},
+		bson.M{"$set": bson.M{"sign_count": signCount}},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update WebAuthn sign count: %w", err)
+	}
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("credential not found")
+	}
+	return nil
 }

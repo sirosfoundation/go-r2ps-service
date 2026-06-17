@@ -14,6 +14,7 @@ type MemoryStore struct {
 	usage         map[string]bool          // "category|idx" -> used
 	publicKeys    map[string]PublicKeyInfo // kid -> PublicKeyInfo
 	records       map[string][]byte        // "clientID|context" -> OPAQUE record bytes
+	webauthn      map[string][]WebAuthnCredential // "clientID|context" -> credentials
 }
 
 // NewMemoryStore creates a new in-memory store.
@@ -25,6 +26,7 @@ func NewMemoryStore() *MemoryStore {
 		usage:         make(map[string]bool),
 		publicKeys:    make(map[string]PublicKeyInfo),
 		records:       make(map[string][]byte),
+		webauthn:      make(map[string][]WebAuthnCredential),
 	}
 }
 
@@ -162,4 +164,51 @@ func (m *MemoryStore) GetRecord(clientID, context string) ([]byte, error) {
 	result := make([]byte, len(r))
 	copy(result, r)
 	return result, nil
+}
+
+func (m *MemoryStore) PutWebAuthnCredential(clientID, context string, cred WebAuthnCredential) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := clientID + "|" + context
+	m.webauthn[key] = append(m.webauthn[key], cred)
+	return nil
+}
+
+func (m *MemoryStore) GetWebAuthnCredential(clientID, context string) ([]WebAuthnCredential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := clientID + "|" + context
+	creds := m.webauthn[key]
+	if len(creds) == 0 {
+		return nil, fmt.Errorf("no WebAuthn credentials for %s/%s", clientID, context)
+	}
+	// Return a copy
+	result := make([]WebAuthnCredential, len(creds))
+	copy(result, creds)
+	return result, nil
+}
+
+func (m *MemoryStore) UpdateWebAuthnSignCount(clientID, context string, credentialID []byte, signCount uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := clientID + "|" + context
+	for i := range m.webauthn[key] {
+		if bytesEqual(m.webauthn[key][i].CredentialID, credentialID) {
+			m.webauthn[key][i].SignCount = signCount
+			return nil
+		}
+	}
+	return fmt.Errorf("credential not found")
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

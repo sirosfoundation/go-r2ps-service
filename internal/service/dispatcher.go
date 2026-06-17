@@ -98,6 +98,7 @@ type Dispatcher struct {
 	handlers   map[string]Handler
 	sessionTTL time.Duration
 	iatMaxSkew time.Duration
+	fido2      *fido2Handler
 }
 
 // DispatcherConfig holds initialization parameters.
@@ -112,6 +113,7 @@ type DispatcherConfig struct {
 	LockoutDur   time.Duration
 	SessionTTL   time.Duration
 	IatMaxSkew   time.Duration // max clock skew for iat validation; 0 = 5 minutes
+	FIDO2        *FIDO2Config  // optional; enables WebAuthn/FIDO2 2FA mode
 }
 
 // NewDispatcher creates a fully wired dispatcher.
@@ -158,6 +160,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		handlers:   hMap,
 		sessionTTL: sessionTTL,
 		iatMaxSkew: iatMaxSkew,
+		fido2:      newFIDO2Handler(cfg.FIDO2),
 	}, nil
 }
 
@@ -240,7 +243,12 @@ func (d *Dispatcher) handle2FA(ctx context.Context, req *r2ps.ServiceRequest) ([
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "malformed 2FA data"}
 	}
 
-	if tfaReq.TFAMode != r2ps.TFAModeOPAQUE {
+	switch tfaReq.TFAMode {
+	case r2ps.TFAModeOPAQUE:
+		// OPAQUE flow — existing logic
+	case r2ps.TFAModeFIDO2:
+		return d.handleFIDO2(ctx, req, &tfaReq)
+	default:
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "unsupported 2fa_mode"}
 	}
 
@@ -394,10 +402,12 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		return nil, &R2PSError{Code: r2ps.ErrUnsupportedType, Msg: "unknown service type"}
 	}
 
+	var sess *pake.Session
+
 	// 1FA service types bypass session verification.
 	if handler.Mode() != Mode1FA {
 		// 2FA service types require an authenticated session
-		sess := d.sessions.Get(req.TFASessionID)
+		sess = d.sessions.Get(req.TFASessionID)
 		if sess == nil {
 			return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "session not found or expired"}
 		}
@@ -408,6 +418,19 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		// Validate session context matches request context
 		if sess.Context != req.Context {
 			return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: "session context mismatch"}
+		}
+
+		// SAD validation for signing operations
+		if req.Type == r2ps.TypeSignECDSA && sess.Task != "" {
+			var signReq ECDSASignRequest
+			if err := json.Unmarshal(req.Data, &signReq); err == nil {
+				hashBytes, err := decodeBase64(signReq.TbsHash)
+				if err == nil {
+					if err := ValidateSAD(sess.Task, hashBytes); err != nil {
+						return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: err.Error()}
+					}
+				}
+			}
 		}
 	}
 
