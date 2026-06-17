@@ -14,7 +14,8 @@ type Session struct {
 	SessionKey []byte
 	ClientMAC  []byte // expected client MAC for KE3 verification
 	ExpiresAt  time.Time
-	Verified   bool // true after KE3 has been verified
+	Verified   bool   // true after KE3 has been verified
+	Task       string // task binding for SAD (Signature Activation Data)
 }
 
 // SessionStore manages active PAKE sessions.
