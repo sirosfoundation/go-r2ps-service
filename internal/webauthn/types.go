@@ -15,11 +15,11 @@ import (
 
 // Credential represents a registered WebAuthn credential.
 type Credential struct {
-	CredentialID []byte          // Credential identifier
+	CredentialID []byte           // Credential identifier
 	PublicKey    *ecdsa.PublicKey // P-256 credential public key
-	SignCount    uint32          // Last known signature counter
-	AAGUID      []byte          // Authenticator AAGUID
-	CreatedAt   int64           // Unix timestamp of registration
+	SignCount    uint32           // Last known signature counter
+	AAGUID       []byte           // Authenticator AAGUID
+	CreatedAt    int64            // Unix timestamp of registration
 }
 
 // ClientDataJSON represents the parsed clientDataJSON structure.

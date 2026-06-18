@@ -72,8 +72,8 @@ type Store interface {
 // WebAuthnCredential holds a stored WebAuthn credential.
 type WebAuthnCredential struct {
 	CredentialID []byte `json:"credential_id" bson:"credential_id"`
-	PublicKey    []byte `json:"public_key" bson:"public_key"`     // Uncompressed SEC1 P-256 point
-	SignCount    uint32 `json:"sign_count" bson:"sign_count"`     // Last known signature counter
-	AAGUID       []byte `json:"aaguid" bson:"aaguid"`            // Authenticator AAGUID
-	CreatedAt    int64  `json:"created_at" bson:"created_at"`    // Unix timestamp
+	PublicKey    []byte `json:"public_key" bson:"public_key"` // Uncompressed SEC1 P-256 point
+	SignCount    uint32 `json:"sign_count" bson:"sign_count"` // Last known signature counter
+	AAGUID       []byte `json:"aaguid" bson:"aaguid"`         // Authenticator AAGUID
+	CreatedAt    int64  `json:"created_at" bson:"created_at"` // Unix timestamp
 }

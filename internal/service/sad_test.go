@@ -6,10 +6,10 @@ import (
 
 func TestParseSADTask(t *testing.T) {
 	tests := []struct {
-		name     string
-		task     string
-		wantNil  bool
-		wantLen  int
+		name    string
+		task    string
+		wantNil bool
+		wantLen int
 	}{
 		{"empty task", "", true, 0},
 		{"non-signing task", "keygen", true, 0},

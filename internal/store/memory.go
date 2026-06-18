@@ -8,12 +8,12 @@ import (
 // MemoryStore is an in-memory implementation of Store for development and testing.
 type MemoryStore struct {
 	mu            sync.Mutex
-	counters      map[string]int           // category -> next index
-	statuses      map[string]map[int]byte  // category -> idx -> status
-	clientIndices map[string][]int         // "clientID|category" -> []idx
-	usage         map[string]bool          // "category|idx" -> used
-	publicKeys    map[string]PublicKeyInfo // kid -> PublicKeyInfo
-	records       map[string][]byte        // "clientID|context" -> OPAQUE record bytes
+	counters      map[string]int                  // category -> next index
+	statuses      map[string]map[int]byte         // category -> idx -> status
+	clientIndices map[string][]int                // "clientID|category" -> []idx
+	usage         map[string]bool                 // "category|idx" -> used
+	publicKeys    map[string]PublicKeyInfo        // kid -> PublicKeyInfo
+	records       map[string][]byte               // "clientID|context" -> OPAQUE record bytes
 	webauthn      map[string][]WebAuthnCredential // "clientID|context" -> credentials
 }
 
