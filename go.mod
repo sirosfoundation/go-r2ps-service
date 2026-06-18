@@ -5,8 +5,8 @@ go 1.26
 require (
 	github.com/bytemare/opaque v0.18.0
 	github.com/go-jose/go-jose/v4 v4.1.4
-	github.com/miekg/pkcs11 v1.1.2
 	github.com/prometheus/client_golang v1.23.2
+	github.com/sirosfoundation/go-cryptoutil/pkcs11pool v0.1.0
 	go.mongodb.org/mongo-driver v1.17.9
 	golang.org/x/crypto v0.49.0
 )
@@ -25,6 +25,7 @@ require (
 	github.com/gtank/ristretto255 v0.2.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
+	github.com/miekg/pkcs11 v1.1.2 // indirect
 	github.com/montanaflynn/stats v0.7.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
