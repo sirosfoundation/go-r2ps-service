@@ -12,27 +12,41 @@
 
 </div>
 
-R2PS (Remote PAKE-Protected Services) server implementation in Go.
+R2PS (Remote Two-factor Protected Services) server implementation in Go.
 
-Implements the R2PS protocol for secure remote cryptographic operations with
-OPAQUE (RFC 9807) authentication and JWS-signed request/response envelopes.
-All cryptographic key operations are performed via PKCS#11 (SoftHSM2 for
+Implements the R2PS protocol as specified in
+[draft-santesson-r2ps-00](https://datatracker.ietf.org/doc/draft-santesson-r2ps/)
+for secure remote cryptographic operations with OPAQUE (RFC 9807) and FIDO2
+authentication, and JWS/JWE-signed request/response envelopes. All
+cryptographic key operations are performed via PKCS#11 (SoftHSM2 for
 development, hardware HSM for production).
 
 The server acts as both a **WSCD backend** (remote key generation, ECDSA
 signing, ECDH agreement via PKCS#11) and a **WSCA** (Wallet Key Attestation
 and Wallet Instance Attestation issuance per ETSI TS 119 476-3 / CS-04).
+These WSCD/WSCA service types extend the base R2PS protocol defined in the
+Internet-Draft.
 
 ## Specification
 
-The authoritative R2PS protocol specifications are maintained in
+The R2PS base protocol is defined in IETF
+[draft-santesson-r2ps](https://datatracker.ietf.org/doc/draft-santesson-r2ps/).
+The Internet-Draft covers the core protocol structure (JWE/JWS envelopes,
+1FA/2FA protection modes, OPAQUE and FIDO2 authentication) and defines
+three base service types: `create_session`, `2fa_registration`, and
+`2fa_update`.
+
+This implementation extends the base protocol with application-specific
+service types for PKCS#11 operations and EUDIW attestation.
+Implementation-specific specifications are maintained in
 [docs/specs/](docs/specs/):
 
 | Document | Description |
 |----------|-------------|
-| [r2ps.md](docs/specs/r2ps.md) | Base protocol — E2EE transport, 1FA/2FA modes, JWE/JWS structure |
+| [draft-santesson-r2ps-00](https://datatracker.ietf.org/doc/draft-santesson-r2ps/) | **IETF Internet-Draft** — Base protocol, 1FA/2FA modes, OPAQUE, FIDO2 |
+| [r2ps.md](docs/specs/r2ps.md) | Implementation notes — E2EE transport, JWE/JWS structure details |
 | [r2ps-service-types.md](docs/specs/r2ps-service-types.md) | Service types, message structure, 2FA mechanisms |
-| [r2ps-service-types-register.md](docs/specs/r2ps-service-types-register.md) | Registry of all service types |
+| [r2ps-service-types-register.md](docs/specs/r2ps-service-types-register.md) | Registry of all service types (base + application) |
 | [r2ps-service-types-eudiw.md](docs/specs/r2ps-service-types-eudiw.md) | EUDIW profile (eudiw_wka_etsi, eudiw_wia_etsi) |
 | [r2ps-appendix-a.md](docs/specs/r2ps-appendix-a.md) | Service type creation framework/template |
 
@@ -57,11 +71,18 @@ test/integration/    End-to-end tests (SoftHSM2)
 
 ## Implemented Service Types
 
+### Base protocol (draft-santesson-r2ps §4.3)
+
+| Implementation | I-D name | Purpose | Mode |
+|---|---|---|---|
+| `2fa_registration` | `2fa_registration` | Establish OPAQUE/FIDO2 credential | 1FA |
+| `2fa_authenticate` | `create_session` | Verify 2FA and open session | 1FA |
+| `2fa_change` | `2fa_update` | Replace 2FA credential | 2FA |
+
+### Application service types (beyond I-D scope)
+
 | Identifier | Purpose | Mode | WSCD/WSCA role |
 |---|---|---|---|
-| `2fa_registration` | Establish OPAQUE credential | 1FA | — |
-| `2fa_authenticate` | Verify OPAQUE and open session | 1FA | — |
-| `2fa_change` | Replace OPAQUE credential | 2FA | — |
 | `p256_generate` | Generate P-256 key in HSM | 1FA | WSCD |
 | `sign_ecdsa` | ECDSA sign with HSM key | 2FA | WSCD |
 | `agree_ecdh` | ECDH agreement with HSM key | 2FA | WSCD |
