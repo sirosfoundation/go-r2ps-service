@@ -211,10 +211,11 @@ func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "unsupported version"}
 	}
 
-	// Nonce must provide at least 64 bits of entropy (8 bytes when decoded)
+	// Nonce must provide at least 128 bits of entropy (16 bytes when decoded)
+	// per draft-santesson-r2ps §4.2.1.
 	nonceBytes, err := base64.URLEncoding.DecodeString(req.Nonce)
-	if err != nil || len(nonceBytes) < 8 {
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "nonce must be at least 8 bytes"}
+	if err != nil || len(nonceBytes) < 16 {
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "nonce must be at least 16 bytes"}
 	}
 
 	// Validate iat (issued-at) is within acceptable clock skew
@@ -224,13 +225,13 @@ func (d *Dispatcher) Process(ctx context.Context, body []byte) ([]byte, error) {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "iat outside acceptable range"}
 	}
 
-	// Route by type
+	// Route by type — accept both I-D and legacy names
 	switch req.Type {
 	case r2ps.Type2FARegistration:
 		return d.handle2FA(ctx, &req)
-	case r2ps.Type2FAAuthenticate:
+	case r2ps.Type2FAAuthenticate, r2ps.TypeCreateSession:
 		return d.handle2FA(ctx, &req)
-	case r2ps.Type2FAChange:
+	case r2ps.Type2FAChange, r2ps.Type2FAUpdate:
 		return d.handle2FAChange(ctx, &req)
 	default:
 		return d.handleService(ctx, &req)
@@ -243,16 +244,17 @@ func (d *Dispatcher) handle2FA(ctx context.Context, req *r2ps.ServiceRequest) ([
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "malformed 2FA data"}
 	}
 
-	switch tfaReq.TFAMode {
+	protocol := tfaReq.GetProtocol()
+	switch protocol {
 	case r2ps.TFAModeOPAQUE:
 		// OPAQUE flow — existing logic
 	case r2ps.TFAModeFIDO2:
 		return d.handleFIDO2(ctx, req, &tfaReq)
 	default:
-		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "unsupported 2fa_mode"}
+		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "unsupported protocol: " + protocol}
 	}
 
-	reqData, err := base64.URLEncoding.DecodeString(tfaReq.Request)
+	reqData, err := base64.URLEncoding.DecodeString(tfaReq.GetPData())
 	if err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid request encoding"}
 	}
@@ -262,13 +264,13 @@ func (d *Dispatcher) handle2FA(ctx context.Context, req *r2ps.ServiceRequest) ([
 		return d.regEvaluate(ctx, req, &tfaReq, reqData)
 	case req.Type == r2ps.Type2FARegistration && tfaReq.State == r2ps.StateFinalize:
 		return d.regFinalize(ctx, req, &tfaReq, reqData)
-	case req.Type == r2ps.Type2FAChange && tfaReq.State == r2ps.StateEvaluate:
+	case (req.Type == r2ps.Type2FAChange || req.Type == r2ps.Type2FAUpdate) && tfaReq.State == r2ps.StateEvaluate:
 		return d.regEvaluate(ctx, req, &tfaReq, reqData)
-	case req.Type == r2ps.Type2FAChange && tfaReq.State == r2ps.StateFinalize:
+	case (req.Type == r2ps.Type2FAChange || req.Type == r2ps.Type2FAUpdate) && tfaReq.State == r2ps.StateFinalize:
 		return d.regFinalize(ctx, req, &tfaReq, reqData)
-	case req.Type == r2ps.Type2FAAuthenticate && tfaReq.State == r2ps.StateEvaluate:
+	case (req.Type == r2ps.Type2FAAuthenticate || req.Type == r2ps.TypeCreateSession) && tfaReq.State == r2ps.StateEvaluate:
 		return d.authEvaluate(ctx, req, &tfaReq, reqData)
-	case req.Type == r2ps.Type2FAAuthenticate && tfaReq.State == r2ps.StateFinalize:
+	case (req.Type == r2ps.Type2FAAuthenticate || req.Type == r2ps.TypeCreateSession) && tfaReq.State == r2ps.StateFinalize:
 		return d.authFinalize(ctx, req, &tfaReq, reqData)
 	default:
 		return nil, &R2PSError{Code: r2ps.ErrIllegalState, Msg: "invalid type/state combination"}
@@ -282,8 +284,10 @@ func (d *Dispatcher) regEvaluate(_ context.Context, req *r2ps.ServiceRequest, _ 
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "registration evaluate failed"}
 	}
 
+	encoded := base64.URLEncoding.EncodeToString(respBytes)
 	tfaResp := r2ps.TFAResponseData{
-		Response: base64.URLEncoding.EncodeToString(respBytes),
+		PData:    encoded,
+		Response: encoded,
 	}
 	return d.signResponse(req, &tfaResp)
 }
@@ -311,7 +315,7 @@ func (d *Dispatcher) regFinalize(_ context.Context, req *r2ps.ServiceRequest, _ 
 	return d.signResponse(req, &tfaResp)
 }
 
-func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, _ *r2ps.TFARequestData, reqData []byte) ([]byte, error) {
+func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, tfaReq *r2ps.TFARequestData, reqData []byte) ([]byte, error) {
 	// Check lockout
 	if err := d.counter.Check(req.ClientID, req.Context, req.Context); err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrAccessDenied, Msg: err.Error()}
@@ -328,6 +332,15 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, _
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "auth evaluate failed"}
 	}
 
+	// Honor client-requested session_duration if within server max (draft-santesson-r2ps §4.3.4)
+	ttl := d.sessionTTL
+	if tfaReq.SessionDuration > 0 {
+		requested := time.Duration(tfaReq.SessionDuration) * time.Second
+		if requested < ttl {
+			ttl = requested
+		}
+	}
+
 	sessionID := base64.URLEncoding.EncodeToString(icrypto.RandomBytes(32))
 	sess := &pake.Session{
 		ID:         sessionID,
@@ -335,16 +348,19 @@ func (d *Dispatcher) authEvaluate(_ context.Context, req *r2ps.ServiceRequest, _
 		Context:    req.Context,
 		SessionKey: sessionSecret,
 		ClientMAC:  clientMAC,
-		ExpiresAt:  time.Now().Add(d.sessionTTL),
+		ExpiresAt:  time.Now().Add(ttl),
 	}
 
 	if err := d.sessions.Create(sess); err != nil {
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "session creation failed"}
 	}
 
+	ke2Encoded := base64.URLEncoding.EncodeToString(ke2Bytes)
 	tfaResp := r2ps.TFAAuthResponseData{
+		SessionID:    sessionID,
 		TFASessionID: sessionID,
-		Response:     base64.URLEncoding.EncodeToString(ke2Bytes),
+		PData:        ke2Encoded,
+		Response:     ke2Encoded,
 	}
 	return d.signResponse(req, &tfaResp)
 }
@@ -371,6 +387,7 @@ func (d *Dispatcher) authFinalize(_ context.Context, req *r2ps.ServiceRequest, _
 	ActiveSessions.Inc()
 
 	tfaResp := r2ps.TFAAuthResponseData{
+		SessionID:             req.TFASessionID,
 		TFASessionID:          req.TFASessionID,
 		Message:               "authenticated",
 		SessionExpirationTime: sess.ExpiresAt.Unix(),
@@ -450,11 +467,13 @@ func (d *Dispatcher) handleService(ctx context.Context, req *r2ps.ServiceRequest
 		dataJSON, _ = json.Marshal(encoded)
 	}
 
+	success := true
 	svcResp := r2ps.ServiceResponse{
-		Ver:   r2ps.ProtocolVersion,
-		Nonce: req.Nonce,
-		Iat:   time.Now().Unix(),
-		Data:  dataJSON,
+		Ver:     r2ps.ProtocolVersion,
+		Nonce:   req.Nonce,
+		Iat:     time.Now().Unix(),
+		Data:    dataJSON,
+		Success: &success,
 	}
 
 	respJSON, err := json.Marshal(svcResp)
@@ -476,11 +495,13 @@ func (d *Dispatcher) signResponse(req *r2ps.ServiceRequest, data any) ([]byte, e
 		return nil, &R2PSError{Code: r2ps.ErrServerError, Msg: "marshal data failed"}
 	}
 
+	success := true
 	svcResp := r2ps.ServiceResponse{
-		Ver:   r2ps.ProtocolVersion,
-		Nonce: req.Nonce,
-		Iat:   time.Now().Unix(),
-		Data:  json.RawMessage(dataJSON),
+		Ver:     r2ps.ProtocolVersion,
+		Nonce:   req.Nonce,
+		Iat:     time.Now().Unix(),
+		Data:    json.RawMessage(dataJSON),
+		Success: &success,
 	}
 
 	svcJSON, err := json.Marshal(svcResp)

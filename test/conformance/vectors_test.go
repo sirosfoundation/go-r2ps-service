@@ -261,13 +261,14 @@ func TestGenerateGoVectors(t *testing.T) {
 
 	// 2FA request/response data
 	tfaReq := r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateEvaluate,
-		Request: "b3BhcXVlLXJlcXVlc3Q",
+		PData: "b3BhcXVlLXJlcXVlc3Q",
 	}
 	tfaReqJSON, _ := json.Marshal(tfaReq)
 
 	tfaResp := r2ps.TFAResponseData{
+		PData:    "b3BhcXVlLXJlc3BvbnNl",
 		Response: "b3BhcXVlLXJlc3BvbnNl",
 	}
 	tfaRespJSON, _ := json.Marshal(tfaResp)
@@ -312,17 +313,18 @@ func TestGenerateGoVectors(t *testing.T) {
 
 	// 2FA registration flow
 	tfaRegEvalReq, _ := json.Marshal(r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateEvaluate,
-		Request: "cmVnaXN0cmF0aW9uLXJlcXVlc3Q",
+		PData: "cmVnaXN0cmF0aW9uLXJlcXVlc3Q",
 	})
 	tfaRegEvalResp, _ := json.Marshal(r2ps.TFAResponseData{
+		PData:    "cmVnaXN0cmF0aW9uLXJlc3BvbnNl",
 		Response: "cmVnaXN0cmF0aW9uLXJlc3BvbnNl",
 	})
 	tfaRegFinReq, _ := json.Marshal(r2ps.TFARequestData{
-		TFAMode:       r2ps.TFAModeOPAQUE,
+		Protocol:      r2ps.TFAModeOPAQUE,
 		State:         r2ps.StateFinalize,
-		Request:       "cmVnaXN0cmF0aW9uLXJlY29yZA",
+		PData:         "cmVnaXN0cmF0aW9uLXJlY29yZA",
 		Authorization: "YXV0aG9yaXphdGlvbi1kYXRh",
 	})
 	tfaRegFinResp, _ := json.Marshal(r2ps.TFAResponseData{
@@ -331,20 +333,23 @@ func TestGenerateGoVectors(t *testing.T) {
 
 	// 2FA auth flow
 	tfaAuthEvalReq, _ := json.Marshal(r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateEvaluate,
-		Request: "S0UxLWJ5dGVz",
+		PData: "S0UxLWJ5dGVz",
 	})
 	tfaAuthEvalResp, _ := json.Marshal(r2ps.TFAAuthResponseData{
+		SessionID:    "auth-session-001",
 		TFASessionID: "auth-session-001",
+		PData:        "S0UyLWJ5dGVz",
 		Response:     "S0UyLWJ5dGVz",
 	})
 	tfaAuthFinReq, _ := json.Marshal(r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateFinalize,
-		Request: "S0UzLWJ5dGVz",
+		PData: "S0UzLWJ5dGVz",
 	})
 	tfaAuthFinResp, _ := json.Marshal(r2ps.TFAAuthResponseData{
+		SessionID:             "auth-session-001",
 		TFASessionID:          "auth-session-001",
 		Message:               "authenticated",
 		SessionExpirationTime: 1716403600,
@@ -352,14 +357,14 @@ func TestGenerateGoVectors(t *testing.T) {
 
 	// 2FA change flow
 	tfaChgEvalReq, _ := json.Marshal(r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateEvaluate,
-		Request: "bmV3LXJlZ2lzdHJhdGlvbi1yZXF1ZXN0",
+		PData: "bmV3LXJlZ2lzdHJhdGlvbi1yZXF1ZXN0",
 	})
 	tfaChgFinReq, _ := json.Marshal(r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateFinalize,
-		Request: "bmV3LXJlZ2lzdHJhdGlvbi1yZWNvcmQ",
+		PData: "bmV3LXJlZ2lzdHJhdGlvbi1yZWNvcmQ",
 	})
 
 	// Mode constraints

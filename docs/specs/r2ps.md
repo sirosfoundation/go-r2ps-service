@@ -1,6 +1,12 @@
 Remote Two-Factor Protected Services (R2PS)
 ===
 
+> **Note**: The base R2PS protocol is now published as IETF
+> Internet-Draft [draft-santesson-r2ps-00](https://datatracker.ietf.org/doc/draft-santesson-r2ps/).
+> This document predates the I-D and contains implementation-specific details.
+> See [ietf-alignment.md](ietf-alignment.md) for a mapping between this
+> specification and the I-D.
+
 # 0. Abstract
 
 This specification defines R2PS, a protocol for exchanging data between a client and a backend services infrastructure, allowing the client to offload critical operations to secure services. Its primary motivation is enabling remote access to resources that protect cryptographic keys, such as a remote WSCD for the EU Digital Identity Wallet (EUDIW).

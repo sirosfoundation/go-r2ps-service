@@ -3,18 +3,35 @@ package crypto
 import (
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/go-jose/go-jose/v4"
 	"golang.org/x/crypto/hkdf"
 )
 
+// JWEHash computes the jwe_hash value per draft-santesson-r2ps §4.2.1:
+// base64url(SHA-256(JWE protected header)).
+// The input is the JWE compact serialization.
+func JWEHash(compact string) (string, error) {
+	parts := strings.SplitN(compact, ".", 2)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid JWE compact serialization")
+	}
+	protectedHeader := parts[0] // base64url-encoded protected header
+	h := sha256.Sum256([]byte(protectedHeader))
+	return base64.RawURLEncoding.EncodeToString(h[:]), nil
+}
+
 // EncryptJWE1FA encrypts plaintext using ECDH-ES / A256GCM for 1FA mode.
-// apu and apv are set per r2ps.md §3.1: apu=client_id (requests) or context (responses),
+// apu and apv are set per draft-santesson-r2ps §4.1.1:
+// apu=client_id (requests) or context (responses),
 // apv=context (requests) or client_id (responses).
 func EncryptJWE1FA(plaintext []byte, recipientKey *ecdsa.PublicKey, kid, apu, apv string) (string, error) {
 	opts := (&jose.EncrypterOptions{}).WithContentType(jose.ContentType("JWT"))
+	opts.WithType(jose.ContentType("r2ps-1fa")) // draft-santesson-r2ps §4.1.1
 	opts.WithHeader(jose.HeaderKey("kid"), kid)
 	opts.WithHeader(jose.HeaderKey("apu"), apu)
 	opts.WithHeader(jose.HeaderKey("apv"), apv)
@@ -85,6 +102,7 @@ func appendLenPrefixed(buf, data []byte) []byte {
 
 // EncryptJWE2FA encrypts plaintext for 2FA mode using A256KW / A256GCM with a
 // KEK derived from the session key. kid is the session identifier.
+// Per draft-santesson-r2ps §4.1.2.
 func EncryptJWE2FA(plaintext []byte, sessionKey []byte, sessionID, direction string) (string, error) {
 	kek, err := Derive2FAKEK(sessionKey, direction, sessionID)
 	if err != nil {
@@ -92,6 +110,7 @@ func EncryptJWE2FA(plaintext []byte, sessionKey []byte, sessionID, direction str
 	}
 
 	opts := (&jose.EncrypterOptions{}).WithContentType(jose.ContentType("JWT"))
+	opts.WithType(jose.ContentType("r2ps-2fa")) // draft-santesson-r2ps §4.1.2
 	opts.WithHeader(jose.HeaderKey("kid"), sessionID)
 
 	encrypter, err := jose.NewEncrypter(jose.A256GCM, jose.Recipient{

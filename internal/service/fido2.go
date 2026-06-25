@@ -113,9 +113,9 @@ func (d *Dispatcher) handleFIDO2(_ context.Context, req *r2ps.ServiceRequest, tf
 		return d.fido2RegChallenge(req)
 	case req.Type == r2ps.Type2FARegistration && tfaReq.State == r2ps.StateRegister:
 		return d.fido2RegRegister(req, tfaReq)
-	case req.Type == r2ps.Type2FAAuthenticate && tfaReq.State == r2ps.StateChallenge:
+	case (req.Type == r2ps.Type2FAAuthenticate || req.Type == r2ps.TypeCreateSession) && tfaReq.State == r2ps.StateChallenge:
 		return d.fido2AuthChallenge(req)
-	case req.Type == r2ps.Type2FAAuthenticate && tfaReq.State == r2ps.StateFinalize:
+	case (req.Type == r2ps.Type2FAAuthenticate || req.Type == r2ps.TypeCreateSession) && tfaReq.State == r2ps.StateFinalize:
 		return d.fido2AuthFinalize(req, tfaReq)
 	default:
 		return nil, &R2PSError{Code: r2ps.ErrIllegalState, Msg: "invalid fido2 type/state combination"}
@@ -154,10 +154,11 @@ func (d *Dispatcher) fido2RegChallenge(req *r2ps.ServiceRequest) ([]byte, error)
 func (d *Dispatcher) fido2RegRegister(req *r2ps.ServiceRequest, tfaReq *r2ps.TFARequestData) ([]byte, error) {
 	// Parse the request field (JSON object for fido2 registration)
 	var regReq fido2RegRegisterRequest
-	reqBytes, err := decodeBase64(tfaReq.Request)
+	pData := tfaReq.GetPData()
+	reqBytes, err := decodeBase64(pData)
 	if err != nil {
 		// Try parsing as raw JSON (per spec, request is a JSON object for fido2 register)
-		if err2 := json.Unmarshal([]byte(tfaReq.Request), &regReq); err2 != nil {
+		if err2 := json.Unmarshal([]byte(pData), &regReq); err2 != nil {
 			return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid fido2 registration request"}
 		}
 	} else {
@@ -176,10 +177,10 @@ func (d *Dispatcher) fido2RegRegister(req *r2ps.ServiceRequest, tfaReq *r2ps.TFA
 		return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid client_data encoding"}
 	}
 
-	// Validate authorization — either a session ID (for 2fa_change) or other auth scheme
+	// Validate authorization — either a session ID (for 2fa_change/2fa_update) or other auth scheme
 	// For initial registration, the outer JWS already proves CSK possession
-	// For 2fa_change, tfaReq.Authorization must be a valid session ID
-	if req.Type == r2ps.Type2FAChange {
+	// For 2fa_change/2fa_update, tfaReq.Authorization must be a valid session ID
+	if req.Type == r2ps.Type2FAChange || req.Type == r2ps.Type2FAUpdate {
 		if tfaReq.Authorization == "" {
 			return nil, &R2PSError{Code: r2ps.ErrUnauthorized, Msg: "authorization required for credential change"}
 		}
@@ -204,7 +205,7 @@ func (d *Dispatcher) fido2RegRegister(req *r2ps.ServiceRequest, tfaReq *r2ps.TFA
 	// For now: extract challenge from clientDataJSON and verify it's a valid fresh token
 	// by requiring the client to pass the token in the authorization field.
 	var expectedChallenge string
-	if tfaReq.Authorization != "" && req.Type != r2ps.Type2FAChange {
+	if tfaReq.Authorization != "" && req.Type != r2ps.Type2FAChange && req.Type != r2ps.Type2FAUpdate {
 		tokenBytes, err := decodeBase64(tfaReq.Authorization)
 		if err != nil {
 			return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid token encoding"}
@@ -313,9 +314,10 @@ func (d *Dispatcher) fido2AuthChallenge(req *r2ps.ServiceRequest) ([]byte, error
 func (d *Dispatcher) fido2AuthFinalize(req *r2ps.ServiceRequest, tfaReq *r2ps.TFARequestData) ([]byte, error) {
 	// Parse request (JSON object)
 	var finalReq fido2AuthFinalizeRequest
-	reqBytes, err := decodeBase64(tfaReq.Request)
+	pData := tfaReq.GetPData()
+	reqBytes, err := decodeBase64(pData)
 	if err != nil {
-		if err2 := json.Unmarshal([]byte(tfaReq.Request), &finalReq); err2 != nil {
+		if err2 := json.Unmarshal([]byte(pData), &finalReq); err2 != nil {
 			return nil, &R2PSError{Code: r2ps.ErrIllegalRequestData, Msg: "invalid finalize request"}
 		}
 	} else {
