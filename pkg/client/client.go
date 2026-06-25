@@ -66,9 +66,9 @@ func (c *Client) Register(password []byte) error {
 	}
 
 	tfaReq := r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateEvaluate,
-		Request: base64.URLEncoding.EncodeToString(regReq.Serialize()),
+		PData: base64.URLEncoding.EncodeToString(regReq.Serialize()),
 	}
 
 	resp, err := c.send2FA(r2ps.Type2FARegistration, "", &tfaReq)
@@ -104,9 +104,9 @@ func (c *Client) Register(password []byte) error {
 	}
 
 	tfaReqFin := r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateFinalize,
-		Request: base64.URLEncoding.EncodeToString(record.Serialize()),
+		PData: base64.URLEncoding.EncodeToString(record.Serialize()),
 	}
 
 	_, err = c.send2FA(r2ps.Type2FARegistration, "", &tfaReqFin)
@@ -128,9 +128,9 @@ func (c *Client) Authenticate(password []byte) error {
 	}
 
 	tfaReq := r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateEvaluate,
-		Request: base64.URLEncoding.EncodeToString(ke1.Serialize()),
+		PData: base64.URLEncoding.EncodeToString(ke1.Serialize()),
 	}
 
 	resp, err := c.send2FA(r2ps.Type2FAAuthenticate, "", &tfaReq)
@@ -165,9 +165,9 @@ func (c *Client) Authenticate(password []byte) error {
 	}
 
 	tfaReqFin := r2ps.TFARequestData{
-		TFAMode: r2ps.TFAModeOPAQUE,
+		Protocol: r2ps.TFAModeOPAQUE,
 		State:   r2ps.StateFinalize,
-		Request: base64.URLEncoding.EncodeToString(ke3.Serialize()),
+		PData: base64.URLEncoding.EncodeToString(ke3.Serialize()),
 	}
 
 	_, err = c.send2FA(r2ps.Type2FAAuthenticate, authResp.TFASessionID, &tfaReqFin)

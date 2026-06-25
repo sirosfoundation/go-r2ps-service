@@ -167,24 +167,41 @@ func TestProtocolTFARequest(t *testing.T) {
 			if err := json.Unmarshal([]byte(v.Protocol.TFARequestJSON), &req); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			assertNonEmpty(t, "2fa_mode", req.TFAMode)
-			assertNonEmpty(t, "request", req.Request)
+			// Accept both I-D ("protocol"/"p_data") and legacy ("2fa_mode"/"request") field names
+			protocol := req.GetProtocol()
+			pData := req.GetPData()
+			assertNonEmpty(t, "protocol/2fa_mode", protocol)
+			assertNonEmpty(t, "p_data/request", pData)
 
 			validModes := map[string]bool{
 				r2ps.TFAModeOPAQUE:   true,
 				r2ps.TFAModePassword: true,
 				r2ps.TFAModeFIDO2:    true,
 			}
-			if !validModes[req.TFAMode] {
-				t.Errorf("invalid 2fa_mode: %q", req.TFAMode)
+			if !validModes[protocol] {
+				t.Errorf("invalid protocol/2fa_mode: %q", protocol)
 			}
 
 			raw := make(map[string]json.RawMessage)
 			json.Unmarshal([]byte(v.Protocol.TFARequestJSON), &raw)
-			for _, f := range []string{"2fa_mode", "request"} {
-				if _, ok := raw[f]; !ok {
-					t.Errorf("missing required field %q in JSON", f)
+			// Accept either I-D or legacy field names
+			hasProtocol := false
+			for _, f := range []string{"protocol", "2fa_mode"} {
+				if _, ok := raw[f]; ok {
+					hasProtocol = true
 				}
+			}
+			if !hasProtocol {
+				t.Error("missing required field 'protocol' or '2fa_mode' in JSON")
+			}
+			hasPData := false
+			for _, f := range []string{"p_data", "request"} {
+				if _, ok := raw[f]; ok {
+					hasPData = true
+				}
+			}
+			if !hasPData {
+				t.Error("missing required field 'p_data' or 'request' in JSON")
 			}
 		})
 	}
@@ -198,15 +215,15 @@ func TestProtocolTFAResponse(t *testing.T) {
 			if err := json.Unmarshal([]byte(v.Protocol.TFAResponseJSON), &resp); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			if resp.Response == "" && resp.Message == "" {
-				t.Error("at least response or message must be present")
+			if resp.GetPData() == "" && resp.Message == "" {
+				t.Error("at least p_data/response or message must be present")
 			}
 
 			raw := make(map[string]json.RawMessage)
 			json.Unmarshal([]byte(v.Protocol.TFAResponseJSON), &raw)
 			for key := range raw {
 				switch key {
-				case "response", "message":
+				case "p_data", "response", "message":
 				default:
 					t.Errorf("unexpected field %q in TFA response data", key)
 				}
@@ -318,17 +335,17 @@ func TestTFARegistrationOPAQUE(t *testing.T) {
 			}
 			var req r2ps.TFARequestData
 			json.Unmarshal([]byte(v.Protocol.TFARegEvaluateReq), &req)
-			if req.TFAMode != r2ps.TFAModeOPAQUE {
-				t.Errorf("2fa_mode=%q, want opaque", req.TFAMode)
+			if req.GetProtocol() != r2ps.TFAModeOPAQUE {
+				t.Errorf("protocol=%q, want opaque", req.GetProtocol())
 			}
 			if req.State != r2ps.StateEvaluate {
 				t.Errorf("state=%q, want evaluate", req.State)
 			}
-			assertNonEmpty(t, "request", req.Request)
+			assertNonEmpty(t, "p_data/request", req.GetPData())
 
 			var resp r2ps.TFAResponseData
 			json.Unmarshal([]byte(v.Protocol.TFARegEvaluateResp), &resp)
-			assertNonEmpty(t, "response", resp.Response)
+			assertNonEmpty(t, "p_data/response", resp.GetPData())
 		})
 
 		t.Run(v.Generator+"/2fa_reg_finalize", func(t *testing.T) {
@@ -363,8 +380,8 @@ func TestTFAAuthenticationOPAQUE(t *testing.T) {
 			}
 			var req r2ps.TFARequestData
 			json.Unmarshal([]byte(v.Protocol.TFAAuthEvaluateReq), &req)
-			if req.TFAMode != r2ps.TFAModeOPAQUE {
-				t.Errorf("2fa_mode=%q, want opaque", req.TFAMode)
+			if req.GetProtocol() != r2ps.TFAModeOPAQUE {
+				t.Errorf("protocol=%q, want opaque", req.GetProtocol())
 			}
 			if req.State != r2ps.StateEvaluate {
 				t.Errorf("state=%q, want evaluate", req.State)
@@ -372,7 +389,7 @@ func TestTFAAuthenticationOPAQUE(t *testing.T) {
 
 			var resp r2ps.TFAAuthResponseData
 			json.Unmarshal([]byte(v.Protocol.TFAAuthEvaluateResp), &resp)
-			assertNonEmpty(t, "2fa_session_id", resp.TFASessionID)
+			assertNonEmpty(t, "session_id/2fa_session_id", resp.GetSessionID())
 		})
 
 		t.Run(v.Generator+"/2fa_auth_finalize", func(t *testing.T) {
@@ -387,7 +404,7 @@ func TestTFAAuthenticationOPAQUE(t *testing.T) {
 
 			var resp r2ps.TFAAuthResponseData
 			json.Unmarshal([]byte(v.Protocol.TFAAuthFinalizeResp), &resp)
-			assertNonEmpty(t, "2fa_session_id", resp.TFASessionID)
+			assertNonEmpty(t, "session_id/2fa_session_id", resp.GetSessionID())
 			if resp.SessionExpirationTime == 0 {
 				t.Error("session_expiration_time must not be zero")
 			}
