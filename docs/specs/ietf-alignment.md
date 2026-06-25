@@ -205,12 +205,13 @@ follow the template in [r2ps-appendix-a.md](r2ps-appendix-a.md).
 
 ## Priority of Alignment Work
 
-1. **High**: Add `jwe_hash` computation and verification
-2. **High**: Add I-D service type names as primary identifiers (`create_session`, `2fa_update`)
-3. **Medium**: Add `success` field to all 2FA responses
-4. **Medium**: Add JWE `typ` headers (`r2ps-1fa`, `r2ps-2fa`)
-5. **Medium**: Rename `2fa_mode` → `protocol`, `request`/`response` → `p_data`
-6. **Low**: Increase nonce minimum to 16 bytes
-7. **Low**: Add `session_duration` support
-8. **Low**: Add `authorization_type` field
+1. ~~**High**: Add `jwe_hash` computation and verification~~ ✅ Field added; `JWEHash()` function implemented. Verification in dispatcher pending (requires transport-layer integration).
+2. ~~**High**: Add I-D service type names as primary identifiers (`create_session`, `2fa_update`)~~ ✅ Done — dispatcher accepts both.
+3. ~~**Medium**: Add `success` field to all 2FA responses~~ ✅ Done — all responses include `"success": true`.
+4. ~~**Medium**: Add JWE `typ` headers (`r2ps-1fa`, `r2ps-2fa`)~~ ✅ Done — set in EncryptJWE1FA/EncryptJWE2FA.
+5. ~~**Medium**: Rename `2fa_mode` → `protocol`, `request`/`response` → `p_data`~~ ✅ Done — I-D names primary, legacy accepted.
+6. ~~**Low**: Increase nonce minimum to 16 bytes~~ ✅ Done.
+7. ~~**Low**: Add `session_duration` support~~ ✅ Done — honored if less than server max.
+8. ~~**Low**: Add `authorization_type` field~~ ✅ Field added to TFARequestData.
 9. **Deferred**: Evaluate `alg: dir` vs `A256KW` for 2FA mode (security trade-off)
+10. **Remaining**: Integrate `jwe_hash` verification into transport layer (requires changes to the outer HTTP handler that manages JWE encryption/decryption)
