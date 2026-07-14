@@ -262,8 +262,8 @@ func TestGenerateGoVectors(t *testing.T) {
 	// 2FA request/response data
 	tfaReq := r2ps.TFARequestData{
 		Protocol: r2ps.TFAModeOPAQUE,
-		State:   r2ps.StateEvaluate,
-		PData: "b3BhcXVlLXJlcXVlc3Q",
+		State:    r2ps.StateEvaluate,
+		PData:    "b3BhcXVlLXJlcXVlc3Q",
 	}
 	tfaReqJSON, _ := json.Marshal(tfaReq)
 
@@ -314,8 +314,8 @@ func TestGenerateGoVectors(t *testing.T) {
 	// 2FA registration flow
 	tfaRegEvalReq, _ := json.Marshal(r2ps.TFARequestData{
 		Protocol: r2ps.TFAModeOPAQUE,
-		State:   r2ps.StateEvaluate,
-		PData: "cmVnaXN0cmF0aW9uLXJlcXVlc3Q",
+		State:    r2ps.StateEvaluate,
+		PData:    "cmVnaXN0cmF0aW9uLXJlcXVlc3Q",
 	})
 	tfaRegEvalResp, _ := json.Marshal(r2ps.TFAResponseData{
 		PData:    "cmVnaXN0cmF0aW9uLXJlc3BvbnNl",
@@ -334,8 +334,8 @@ func TestGenerateGoVectors(t *testing.T) {
 	// 2FA auth flow
 	tfaAuthEvalReq, _ := json.Marshal(r2ps.TFARequestData{
 		Protocol: r2ps.TFAModeOPAQUE,
-		State:   r2ps.StateEvaluate,
-		PData: "S0UxLWJ5dGVz",
+		State:    r2ps.StateEvaluate,
+		PData:    "S0UxLWJ5dGVz",
 	})
 	tfaAuthEvalResp, _ := json.Marshal(r2ps.TFAAuthResponseData{
 		SessionID:    "auth-session-001",
@@ -345,8 +345,8 @@ func TestGenerateGoVectors(t *testing.T) {
 	})
 	tfaAuthFinReq, _ := json.Marshal(r2ps.TFARequestData{
 		Protocol: r2ps.TFAModeOPAQUE,
-		State:   r2ps.StateFinalize,
-		PData: "S0UzLWJ5dGVz",
+		State:    r2ps.StateFinalize,
+		PData:    "S0UzLWJ5dGVz",
 	})
 	tfaAuthFinResp, _ := json.Marshal(r2ps.TFAAuthResponseData{
 		SessionID:             "auth-session-001",
@@ -358,13 +358,13 @@ func TestGenerateGoVectors(t *testing.T) {
 	// 2FA change flow
 	tfaChgEvalReq, _ := json.Marshal(r2ps.TFARequestData{
 		Protocol: r2ps.TFAModeOPAQUE,
-		State:   r2ps.StateEvaluate,
-		PData: "bmV3LXJlZ2lzdHJhdGlvbi1yZXF1ZXN0",
+		State:    r2ps.StateEvaluate,
+		PData:    "bmV3LXJlZ2lzdHJhdGlvbi1yZXF1ZXN0",
 	})
 	tfaChgFinReq, _ := json.Marshal(r2ps.TFARequestData{
 		Protocol: r2ps.TFAModeOPAQUE,
-		State:   r2ps.StateFinalize,
-		PData: "bmV3LXJlZ2lzdHJhdGlvbi1yZWNvcmQ",
+		State:    r2ps.StateFinalize,
+		PData:    "bmV3LXJlZ2lzdHJhdGlvbi1yZWNvcmQ",
 	})
 
 	// Mode constraints
