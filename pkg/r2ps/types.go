@@ -35,11 +35,11 @@ type ErrorResponse struct {
 // TFARequestData is the data object for second-factor service requests.
 // See draft-santesson-r2ps §4.3.1 and r2ps-service-types.md §4.1.
 type TFARequestData struct {
-	Protocol          string `json:"protocol"`                     // I-D field name (draft-santesson-r2ps §4.3.1)
-	TFAMode           string `json:"2fa_mode,omitempty"`           // legacy alias — accepted on read
+	Protocol          string `json:"protocol"`           // I-D field name (draft-santesson-r2ps §4.3.1)
+	TFAMode           string `json:"2fa_mode,omitempty"` // legacy alias — accepted on read
 	State             string `json:"state,omitempty"`
-	PData             string `json:"p_data,omitempty"`             // I-D field name
-	Request           string `json:"request,omitempty"`            // legacy alias — accepted on read
+	PData             string `json:"p_data,omitempty"`  // I-D field name
+	Request           string `json:"request,omitempty"` // legacy alias — accepted on read
 	Authorization     string `json:"authorization,omitempty"`
 	AuthorizationType string `json:"authorization_type,omitempty"` // draft-santesson-r2ps §4.3.1
 	SessionDuration   int64  `json:"session_duration,omitempty"`   // draft-santesson-r2ps §4.3.4
@@ -80,10 +80,10 @@ func (t *TFAResponseData) GetPData() string {
 // TFAAuthResponseData extends TFAResponseData with session establishment fields.
 // See draft-santesson-r2ps §4.3.4.
 type TFAAuthResponseData struct {
-	SessionID             string `json:"session_id,omitempty"`              // I-D field name
-	TFASessionID          string `json:"2fa_session_id,omitempty"`          // legacy alias
-	PData                 string `json:"p_data,omitempty"`                  // I-D field name
-	Response              string `json:"response,omitempty"`                // legacy alias
+	SessionID             string `json:"session_id,omitempty"`     // I-D field name
+	TFASessionID          string `json:"2fa_session_id,omitempty"` // legacy alias
+	PData                 string `json:"p_data,omitempty"`         // I-D field name
+	Response              string `json:"response,omitempty"`       // legacy alias
 	Message               string `json:"message,omitempty"`
 	SessionExpirationTime int64  `json:"session_expiration_time,omitempty"`
 	Task                  string `json:"task,omitempty"` // echoed task binding (draft-santesson-r2ps §4.3.4)

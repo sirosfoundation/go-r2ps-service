@@ -196,12 +196,12 @@ func (d *Dispatcher) fido2RegRegister(req *r2ps.ServiceRequest, tfaReq *r2ps.TFA
 	// The server validates clientDataJSON.challenge matches the challenge from the first round.
 	// Since we're stateless, we use the token for binding. The client must include the token.
 	// Re-reading the spec: The register request doesn't carry the token. The server must
-	// verify that clientDataJSON.challenge matches a recently-issued challenge. 
+	// verify that clientDataJSON.challenge matches a recently-issued challenge.
 	// For stateless operation, the authorization field can carry the token for registration.
 	// Let's use the credential_id as lookup — actually, the simplest approach:
 	// The spec says challenge in clientDataJSON must match server-generated challenge.
 	// We need the token from the challenge round. Let the authorization carry it for reg.
-	
+
 	// For now: extract challenge from clientDataJSON and verify it's a valid fresh token
 	// by requiring the client to pass the token in the authorization field.
 	var expectedChallenge string
@@ -262,7 +262,7 @@ func (d *Dispatcher) fido2RegRegister(req *r2ps.ServiceRequest, tfaReq *r2ps.TFA
 		CredentialID: authData.CredentialID,
 		PublicKey:    pubKeyBytes,
 		SignCount:    authData.SignCount,
-		AAGUID:      authData.AAGUID,
+		AAGUID:       authData.AAGUID,
 		CreatedAt:    time.Now().Unix(),
 	}
 	if err := d.fido2.store.PutWebAuthnCredential(req.ClientID, req.Context, cred); err != nil {
@@ -389,7 +389,7 @@ func (d *Dispatcher) fido2AuthFinalize(req *r2ps.ServiceRequest, tfaReq *r2ps.TF
 		CredentialID: matchedCred.CredentialID,
 		PublicKey:    pubKey,
 		SignCount:    matchedCred.SignCount,
-		AAGUID:      matchedCred.AAGUID,
+		AAGUID:       matchedCred.AAGUID,
 		CreatedAt:    matchedCred.CreatedAt,
 	}
 
