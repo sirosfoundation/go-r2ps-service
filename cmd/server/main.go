@@ -23,6 +23,7 @@ import (
 
 	"github.com/sirosfoundation/go-r2ps-service/internal/admin"
 	"github.com/sirosfoundation/go-r2ps-service/internal/audit"
+	"github.com/sirosfoundation/go-r2ps-service/internal/authmw"
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/internal/hsm"
 	"github.com/sirosfoundation/go-r2ps-service/internal/modes"
@@ -31,6 +32,7 @@ import (
 	"github.com/sirosfoundation/go-r2ps-service/internal/statuslist"
 	"github.com/sirosfoundation/go-r2ps-service/internal/store"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
+	"github.com/sirosfoundation/go-tokenauth/validator"
 )
 
 func main() {
@@ -229,7 +231,39 @@ func main() {
 	// Admin API (lifecycle store management) — admin role required.
 	if roles.Has(modes.RoleAdmin) {
 		if adminListen := os.Getenv("R2PS_ADMIN_LISTEN"); adminListen != "" {
-			adminHandler := admin.New(lifecycleStore)
+			var adminOpts []admin.Option
+
+			// Token-based auth: when R2PS_ADMIN_JWKS_URL is set, all admin
+			// endpoints require a valid Bearer token with appropriate TAC.
+			if jwksURL := os.Getenv("R2PS_ADMIN_JWKS_URL"); jwksURL != "" {
+				v := validator.New(validator.Config{
+					JWKSURL:   jwksURL,
+					Issuer:    os.Getenv("R2PS_ADMIN_TOKEN_ISSUER"),
+					Audiences: strings.Split(envOr("R2PS_ADMIN_TOKEN_AUDIENCE", "r2ps-admin"), ","),
+				})
+				v.Start(ctx)
+				defer v.Stop()
+				adminOpts = append(adminOpts, admin.WithValidator(v))
+				slog.Info("admin API: token auth enabled", "jwks_url", jwksURL)
+			} else {
+				// Dev mode: use a static admin token for local testing.
+				devToken := os.Getenv("R2PS_ADMIN_DEV_TOKEN")
+				if devToken == "" {
+					var err error
+					devToken, err = authmw.GenerateDevToken()
+					if err != nil {
+						slog.Error("failed to generate dev admin token", "error", err)
+						os.Exit(1)
+					}
+					slog.Warn("admin API: auto-generated dev token (NOT for production)",
+						"token", devToken)
+				} else {
+					slog.Info("admin API: using configured dev token")
+				}
+				adminOpts = append(adminOpts, admin.WithDevToken(devToken))
+			}
+
+			adminHandler := admin.New(lifecycleStore, adminOpts...)
 			adminSrv := &http.Server{
 				Addr:              adminListen,
 				Handler:           adminHandler,

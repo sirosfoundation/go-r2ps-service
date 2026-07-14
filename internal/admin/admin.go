@@ -1,9 +1,14 @@
 // Package admin provides HTTP handlers for the R2PS admin API.
 //
 // The admin API exposes lifecycle-store inspection and management
-// endpoints for debugging and provisioning. It MUST be served on a
-// separate listener that is not reachable from the public internet
-// (bind to localhost or use network policy).
+// endpoints for debugging and provisioning. When token auth is enabled
+// (via WithValidator), endpoints require appropriate TAC permissions:
+//
+//   - Read-only endpoints (GET): require 'r' (read) or 'l' (list)
+//   - Write endpoints (PUT): require 'w' (write)
+//   - Allocation (POST): require 'i' (insert)
+//
+// Tokens with the 'a' (admin) TAC bypass all permission checks.
 package admin
 
 import (
@@ -13,7 +18,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sirosfoundation/go-r2ps-service/internal/authmw"
 	"github.com/sirosfoundation/go-r2ps-service/internal/store"
+	"github.com/sirosfoundation/go-tokenauth/validator"
 )
 
 // Handler serves the admin API.
@@ -22,18 +29,79 @@ type Handler struct {
 	mux   *http.ServeMux
 }
 
+// Option configures the admin handler.
+type Option func(*options)
+
+type options struct {
+	validator *validator.Validator
+	devToken  string
+}
+
+// WithValidator enables token-based authorization on the admin API.
+// When set, all endpoints require a valid Bearer token with appropriate TAC.
+func WithValidator(v *validator.Validator) Option {
+	return func(o *options) { o.validator = v }
+}
+
+// WithDevToken enables a static Bearer token for development/testing.
+// The token grants full admin access (TAC 'a'). This should NOT be used
+// in production — use WithValidator instead.
+func WithDevToken(token string) Option {
+	return func(o *options) { o.devToken = token }
+}
+
 // New creates a new admin API handler.
-func New(s store.Store) *Handler {
+func New(s store.Store, opts ...Option) *Handler {
+	var o options
+	for _, fn := range opts {
+		fn(&o)
+	}
+
 	h := &Handler{store: s}
 	h.mux = http.NewServeMux()
-	h.mux.HandleFunc("GET /admin/store/statuses/{category}", h.handleListStatuses)
-	h.mux.HandleFunc("GET /admin/store/status/{category}/{idx}", h.handleGetStatus)
-	h.mux.HandleFunc("PUT /admin/store/status/{category}/{idx}", h.handleSetStatus)
-	h.mux.HandleFunc("GET /admin/store/clients/{clientID}/{category}", h.handleGetClientIndices)
-	h.mux.HandleFunc("GET /admin/store/usage/{category}/{idx}", h.handleGetUsage)
-	h.mux.HandleFunc("POST /admin/store/allocate/{category}", h.handleAllocateIndex)
-	h.mux.HandleFunc("GET /admin/store/keys", h.handleListKeys)
-	h.mux.HandleFunc("GET /admin/store/keys/{kid}", h.handleGetKey)
+
+	// Determine the auth middleware to use (if any).
+	var auth func(http.Handler) http.Handler
+	switch {
+	case o.validator != nil:
+		auth = authmw.TokenAuth(o.validator)
+	case o.devToken != "":
+		auth = authmw.DevTokenAuth(o.devToken)
+	}
+
+	if auth != nil {
+		// Auth enabled: apply per-endpoint TAC requirements.
+		// Read-only: list/get operations require 'l' (list) or 'r' (read).
+		readList := authmw.Chain(auth, authmw.RequireTAC("l"))
+		readOne := authmw.Chain(auth, authmw.RequireTAC("r"))
+
+		// Write: status updates require 'w' (write).
+		write := authmw.Chain(auth, authmw.RequireTAC("w"))
+
+		// Insert: allocation requires 'i' (insert).
+		insert := authmw.Chain(auth, authmw.RequireTAC("i"))
+
+		h.mux.Handle("GET /admin/store/statuses/{category}", readList(http.HandlerFunc(h.handleListStatuses)))
+		h.mux.Handle("GET /admin/store/status/{category}/{idx}", readOne(http.HandlerFunc(h.handleGetStatus)))
+		h.mux.Handle("PUT /admin/store/status/{category}/{idx}", write(http.HandlerFunc(h.handleSetStatus)))
+		h.mux.Handle("GET /admin/store/clients/{clientID}/{category}", readList(http.HandlerFunc(h.handleGetClientIndices)))
+		h.mux.Handle("GET /admin/store/usage/{category}/{idx}", readOne(http.HandlerFunc(h.handleGetUsage)))
+		h.mux.Handle("POST /admin/store/allocate/{category}", insert(http.HandlerFunc(h.handleAllocateIndex)))
+		h.mux.Handle("GET /admin/store/keys", readList(http.HandlerFunc(h.handleListKeys)))
+		h.mux.Handle("GET /admin/store/keys/{kid}", readOne(http.HandlerFunc(h.handleGetKey)))
+	} else {
+		// No auth — rely on network isolation (bind to localhost / k8s network policy).
+		slog.Warn("admin API: no token validator configured, relying on network isolation")
+		h.mux.HandleFunc("GET /admin/store/statuses/{category}", h.handleListStatuses)
+		h.mux.HandleFunc("GET /admin/store/status/{category}/{idx}", h.handleGetStatus)
+		h.mux.HandleFunc("PUT /admin/store/status/{category}/{idx}", h.handleSetStatus)
+		h.mux.HandleFunc("GET /admin/store/clients/{clientID}/{category}", h.handleGetClientIndices)
+		h.mux.HandleFunc("GET /admin/store/usage/{category}/{idx}", h.handleGetUsage)
+		h.mux.HandleFunc("POST /admin/store/allocate/{category}", h.handleAllocateIndex)
+		h.mux.HandleFunc("GET /admin/store/keys", h.handleListKeys)
+		h.mux.HandleFunc("GET /admin/store/keys/{kid}", h.handleGetKey)
+	}
+
 	return h
 }
 
