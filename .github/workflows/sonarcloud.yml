@@ -1,4 +1,12 @@
 # SonarCloud code quality and security analysis.
+#
+# This job runs the test suite purely to produce a coverage profile for the
+# scanner. That duplicates the Test job in ci.yml, which is deliberate: the two
+# workflows are triggered independently and a scan that has to wait on another
+# workflow's artifact can only be wired up with `workflow_run`, which does not
+# run for pull requests from the same repository in a way that keeps the PR
+# decoration working. Re-running the suite costs well under a minute here and
+# keeps this workflow self-contained.
 name: SonarCloud
 
 on:
@@ -20,6 +28,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # The HSM-backed packages (internal/hsm, and everything that reaches a
+      # signing key through it) skip their tests without a PKCS#11 module
+      # present, which would silently under-report coverage rather than fail.
+      # Same install as ci.yml's Test job.
+      - name: Install SoftHSM2
+        run: sudo apt-get update && sudo apt-get install -y softhsm2
+
+      # No -race here, unlike ci.yml: this run exists only to produce
+      # coverage.txt, and ci.yml already covers the race detector. Keeping it
+      # off roughly halves the runtime of the duplicate run.
+      - name: Run tests with coverage
+        run: go test -covermode=atomic -coverprofile=coverage.txt ./...
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v8
         env:
@@ -28,3 +55,8 @@ jobs:
           args: >
             -Dsonar.organization=${{ github.repository_owner }}
             -Dsonar.projectKey=${{ github.repository_owner }}_${{ github.event.repository.name }}
+            -Dsonar.sources=.
+            -Dsonar.tests=.
+            -Dsonar.test.inclusions=**/*_test.go
+            -Dsonar.exclusions=**/*_test.go,**/testdata/**
+            -Dsonar.go.coverage.reportPaths=coverage.txt

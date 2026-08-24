@@ -13,6 +13,8 @@ bin/
 *.out
 coverage.html
 coverage.out
+# ci.yml and sonarcloud.yml both write this at the repo root
+coverage.txt
 
 # Dependency directories
 vendor/
