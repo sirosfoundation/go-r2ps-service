@@ -141,7 +141,18 @@ func (h *WKAHandler) Handle(ctx context.Context, clientID string, reqData []byte
 		return nil, fmt.Errorf("marshal WKA payload: %w", err)
 	}
 
-	jwt, err := icrypto.SignJWT(payloadJSON, h.cfg.SigningKey, "keyattestation+jwt", h.cfg.X5CChain)
+	// "key-attestation+jwt", hyphenated, is the IANA media type OpenID4VCI 1.0
+	// registers for a Key Attestation JWT (Appendix G.6.2), which ETSI TS
+	// 119 476-3 profiles for the WKA. The unhyphenated "keyattestation+jwt"
+	// this used to emit was the pre-1.0 draft spelling, and an issuer
+	// validating against the final spec rejects the whole credential request
+	// with invalid_credential_request rather than falling back to the plain
+	// "jwt" proof type - vc's apigw pins typ with `eq=key-attestation+jwt`
+	// (pkg/openid4vci/proof_attestation.go). Other implementations in this
+	// ecosystem - siros-sdk-kotlin's keystore, multipaz - already emit the
+	// hyphenated form, as does this service's own spec document
+	// (docs/specs/r2ps-service-types-eudiw.md), so the code was the outlier.
+	jwt, err := icrypto.SignJWT(payloadJSON, h.cfg.SigningKey, "key-attestation+jwt", h.cfg.X5CChain)
 	if err != nil {
 		return nil, fmt.Errorf("sign WKA JWT: %w", err)
 	}

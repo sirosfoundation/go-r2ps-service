@@ -99,13 +99,18 @@ func TestWKAHandler(t *testing.T) {
 		t.Fatalf("verify WKA signature: %v", err)
 	}
 
-	// Check typ header
-	if len(jws.Signatures) > 0 {
-		if typ, ok := jws.Signatures[0].Protected.ExtraHeaders[joselib.HeaderType]; ok {
-			if s, ok := typ.(string); ok && s != "keyattestation+jwt" {
-				t.Errorf("typ = %q, want keyattestation+jwt", s)
-			}
-		}
+	// Check typ header. Hyphenated, per the IANA media type OpenID4VCI 1.0
+	// registers for a Key Attestation JWT (Appendix G.6.2). Issuers pin this
+	// exactly (vc's apigw uses an `eq` validation on it), so a regression here
+	// fails every credential request that uses the "attestation" proof type.
+	if len(jws.Signatures) == 0 {
+		t.Fatal("WKA JWS has no signatures")
+	}
+	typ, ok := jws.Signatures[0].Protected.ExtraHeaders[joselib.HeaderType]
+	if !ok {
+		t.Error("typ header is missing")
+	} else if s, ok := typ.(string); !ok || s != "key-attestation+jwt" {
+		t.Errorf("typ = %v, want key-attestation+jwt", typ)
 	}
 
 	// Verify payload structure per CS-04 §7.1
