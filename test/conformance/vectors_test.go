@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,19 @@ import (
 	icrypto "github.com/sirosfoundation/go-r2ps-service/internal/crypto"
 	"github.com/sirosfoundation/go-r2ps-service/pkg/r2ps"
 )
+
+// updateVectors gates the one test that writes into testdata. Without it,
+// `go test ./...` rewrites the tracked testdata/vectors_go.json on every run -
+// the keys and every JWS/JWE/HKDF vector derived from them are freshly random
+// each time, so the file always comes back modified. That leaves the working
+// tree dirty after an ordinary test run and makes it easy to sweep a whole new
+// set of vectors into an unrelated commit without noticing.
+//
+// Regenerate deliberately with:
+//
+//	go test ./test/conformance/ -run TestGenerateGoVectors -update-vectors
+var updateVectors = flag.Bool("update-vectors", false,
+	"regenerate testdata/vectors_go.json instead of leaving the committed vectors in place")
 
 // vectorFiles returns the list of vector files to validate.
 func vectorFiles(t *testing.T) []string {
@@ -482,6 +496,15 @@ func TestGenerateGoVectors(t *testing.T) {
 	out, err := json.MarshalIndent(vectors, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal vectors: %v", err)
+	}
+
+	// Everything above still runs unconditionally - it exercises the key
+	// generation, JWS/JWE and HKDF paths this suite exists to cover, and
+	// skipping the test outright would drop that coverage. Only the write is
+	// gated, since that is the part with a side effect outside the test.
+	if !*updateVectors {
+		t.Log("not writing testdata/vectors_go.json; pass -update-vectors to regenerate")
+		return
 	}
 
 	outPath := filepath.Join("..", "..", "testdata", "vectors_go.json")
